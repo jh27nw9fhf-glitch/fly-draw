@@ -5,151 +5,96 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <title>Purple Draw</title>
 <style>
-  :root {
-    --bg: #12081c;
-    --panel: #1e1230;
-    --ink: #f3e8ff;
-    --accent: #c084fc;
-    --muted: #a78bba;
-    --purple: #a855f7;
-  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body {
-    margin: 0; height: 100%; background: var(--bg); color: var(--ink);
-    font-family: -apple-system, system-ui, Segoe UI, sans-serif;
-    overflow: hidden; touch-action: none;
-  }
+  html, body { margin: 0; height: 100%; background: #fff; color: #222;
+    font-family: -apple-system, system-ui, sans-serif; overflow: hidden; touch-action: none; }
   #wrap { display: flex; flex-direction: column; height: 100%; }
-  header {
-    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
-    background: var(--panel); border-bottom: 1px solid #3b2760;
-  }
-  header h1 { font-size: 14px; margin: 0; font-weight: 700; flex: 1; }
-  #toolbar {
-    display: flex; gap: 8px; padding: 8px 10px; flex-wrap: wrap; align-items: center;
-    background: var(--panel); border-bottom: 1px solid #3b2760;
-  }
-  button {
-    border: 0; border-radius: 12px; padding: 9px 12px; font-size: 13px;
-    font-weight: 600; cursor: pointer; background: #2d1f4a; color: var(--ink);
-  }
-  button:active { background: var(--accent); color: #1a0b2e; }
-  button.danger { background: #3a2140; color: #ffb4c8; }
-  #toolbar label { font-size: 12px; color: var(--muted); }
-  #toolbar input[type=range] { width: 90px; }
-  #stage {
-    flex: 1; position: relative; min-height: 0;
-    background: var(--bg);
-  }
-  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
-  #hint {
-    position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
-    background: #0008; padding: 8px 14px; border-radius: 999px;
-    font-size: 12px; pointer-events: none; transition: opacity .4s; max-width: 90%;
-    text-align: center;
-  }
-  #hint.hide { opacity: 0; }
-  #swatch {
-    width: 28px; height: 28px; border-radius: 8px;
-    border: 2px solid #fff3; background: hsl(280 80% 55%);
-  }
+  #toolbar { display: flex; gap: 10px; padding: 10px; align-items: center;
+    background: #f5f0ff; border-bottom: 1px solid #e0d4f7; flex-wrap: wrap; }
+  #toolbar strong { color: #7c3aed; font-size: 14px; margin-right: 4px; }
+  #swatch { width: 24px; height: 24px; border-radius: 50%; background: #a855f7; border: 2px solid #7c3aed; }
+  label { font-size: 13px; color: #666; }
+  input[type=range] { width: 100px; }
+  button { border: 0; border-radius: 10px; padding: 8px 14px; font-size: 13px; font-weight: 600;
+    cursor: pointer; background: #a855f7; color: #fff; }
+  button:active { background: #7c3aed; }
+  button.secondary { background: #eee; color: #444; }
+  #stage { flex: 1; min-height: 0; background: #fff; position: relative; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
 </style>
 </head>
 <body>
 <div id="wrap">
-  <header>
-    <h1>Purple Draw</h1>
-  </header>
   <div id="toolbar">
-    <div id="swatch" title="Purple only"></div>
-    <label>Light</label>
-    <input id="light" type="range" min="25" max="75" value="55" />
+    <strong>Purple Draw</strong>
+    <div id="swatch" title="Purple"></div>
     <label>Size</label>
-    <input id="size" type="range" min="4" max="48" value="14" />
-    <button id="btnClear" class="danger">Clear</button>
-    <button id="btnSave">Save</button>
+    <input id="size" type="range" min="4" max="60" value="16" />
+    <button id="btnClear" class="secondary" type="button">Clear</button>
+    <button id="btnSave" type="button">Save</button>
   </div>
-  <div id="stage">
-    <canvas id="c"></canvas>
-    <div id="hint">Smooth purple lines — no dots. Draw!</div>
-  </div>
+  <div id="stage"><canvas id="c"></canvas></div>
 </div>
 <script>
 (() => {
-  const canvas = document.getElementById("c");
-  const ctx = canvas.getContext("2d");
-  const hint = document.getElementById("hint");
-  const swatch = document.getElementById("swatch");
-  const PURPLE_HUE = 280;
-  let light = 55, size = 14;
-  let drawing = false, last = null, dpr = 1;
+  const PURPLE = '#a855f7';
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let size = 16, drawing = false, last = null, dpr = 1;
 
-  function hsl() { return "hsl(" + PURPLE_HUE + " 80% " + light + "%)"; }
-  function updateSwatch() { swatch.style.background = hsl(); }
-
-  document.getElementById("light").oninput = (e) => {
-    light = +e.target.value; updateSwatch();
-  };
-  document.getElementById("size").oninput = (e) => { size = +e.target.value; };
-
-  function applyStrokeStyle() {
-    ctx.strokeStyle = hsl();
-    ctx.fillStyle = hsl();
-    ctx.lineWidth = size;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-  }
-
-  function strokeTo(x, y) {
-    if (!last) {
-      last = { x: x, y: y };
-      applyStrokeStyle();
-      ctx.beginPath();
-      ctx.arc(x, y, size / 2, 0, Math.PI * 2);
-      ctx.fill();
-      return;
-    }
-    applyStrokeStyle();
-    ctx.beginPath();
-    ctx.moveTo(last.x, last.y);
-    ctx.lineTo(x, y);
-    ctx.stroke();
-    last = { x: x, y: y };
-  }
+  document.getElementById('size').oninput = (e) => { size = +e.target.value; };
 
   function resize() {
-    const stage = document.getElementById("stage");
+    const stage = document.getElementById('stage');
+    const prev = canvas.width ? canvas.toDataURL() : null;
     dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = stage.clientWidth * dpr;
     canvas.height = stage.clientHeight * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = PURPLE;
+    ctx.fillStyle = PURPLE;
+    if (prev) {
+      const img = new Image();
+      img.onload = () => ctx.drawImage(img, 0, 0, canvas.width / dpr, canvas.height / dpr);
+      img.src = prev;
+    }
   }
 
-  function clear() {
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    last = null;
-  }
-
-  function posFromEvent(e) {
+  function pos(e) {
     const r = canvas.getBoundingClientRect();
     const t = e.touches ? e.touches[0] : e;
     return { x: t.clientX - r.left, y: t.clientY - r.top };
   }
 
+  function stamp(x, y) {
+    ctx.beginPath();
+    ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function strokeTo(x, y) {
+    if (!last) { last = { x, y }; stamp(x, y); return; }
+    ctx.lineWidth = size;
+    ctx.beginPath();
+    ctx.moveTo(last.x, last.y);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    last = { x, y };
+  }
+
   function onDown(e) {
     e.preventDefault();
-    hint.classList.add("hide");
     drawing = true;
-    const p = posFromEvent(e);
+    const p = pos(e);
     last = null;
     strokeTo(p.x, p.y);
   }
   function onMove(e) {
     e.preventDefault();
     if (!drawing) return;
-    const p = posFromEvent(e);
+    const p = pos(e);
     strokeTo(p.x, p.y);
   }
   function onUp(e) {
@@ -158,34 +103,29 @@
     last = null;
   }
 
-  canvas.addEventListener("mousedown", onDown);
-  canvas.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp);
-  canvas.addEventListener("touchstart", onDown, { passive: false });
-  canvas.addEventListener("touchmove", onMove, { passive: false });
-  canvas.addEventListener("touchend", onUp, { passive: false });
+  canvas.addEventListener('mousedown', onDown);
+  canvas.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+  canvas.addEventListener('touchstart', onDown, { passive: false });
+  canvas.addEventListener('touchmove', onMove, { passive: false });
+  canvas.addEventListener('touchend', onUp, { passive: false });
 
-  document.getElementById("btnClear").onclick = function() { clear(); };
-  document.getElementById("btnSave").onclick = function() {
-    const a = document.createElement("a");
-    a.download = "purple-draw.png";
-    a.href = canvas.toDataURL("image/png");
+  document.getElementById('btnClear').onclick = () => {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.strokeStyle = PURPLE;
+    ctx.fillStyle = PURPLE;
+  };
+  document.getElementById('btnSave').onclick = () => {
+    const a = document.createElement('a');
+    a.download = 'purple-draw.png';
+    a.href = canvas.toDataURL('image/png');
     a.click();
   };
 
-  window.addEventListener("resize", function() {
-    const prev = canvas.toDataURL();
-    resize();
-    const img = new Image();
-    img.onload = function() {
-      ctx.drawImage(img, 0, 0, canvas.width / dpr, canvas.height / dpr);
-    };
-    img.src = prev;
-  });
-
-  updateSwatch();
+  window.addEventListener('resize', resize);
   resize();
-  setTimeout(function() { hint.classList.add("hide"); }, 4500);
 })();
 </script>
 </body>
