@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%23c084fc'/%3E%3C/svg%3E" />
 <title>Purple Draw</title>
 <style>
   :root {
@@ -74,6 +75,17 @@
     font-size: 14px; font-weight: 700; line-height: 1.35;
     border-bottom: 1px solid #e9d5ff;
   }
+  #brushHud {
+    margin: 0; padding: 2px 12px 7px;
+    background: #f3e8ff; color: #6b21a8;
+    font-size: 12px; font-weight: 700; line-height: 1.35;
+    border-bottom: 1px solid #e9d5ff;
+  }
+  #brushHud[hidden] { display: none; }
+  #brushUsing, #brushMade {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #brushMade { font-weight: 600; color: #7c3aed; }
 </style>
 </head>
 <body>
@@ -92,13 +104,17 @@
       <input id="size" type="range" min="4" max="48" value="14" />
     </div>
     <div class="actions">
-      <button id="btnAuto" type="button" aria-pressed="false" title="The fly practices Starry Night until he gets really good">Autopilot</button>
+      <button id="btnAuto" type="button" aria-pressed="false" title="The fly invents his own brushes and practices Starry Night">Autopilot</button>
       <button id="btnStarry" type="button" aria-pressed="false" title="Paint The Starry Night">Starry Night</button>
       <button id="btnClear" class="danger" type="button">Clear</button>
       <button id="btnSave" type="button">Save</button>
     </div>
   </div>
   <p id="practiceNote" role="status" aria-live="polite">The fly practices Starry Night until he's really good.</p>
+  <div id="brushHud" hidden>
+    <div id="brushUsing"></div>
+    <div id="brushMade"></div>
+  </div>
   <div id="colors">
     <div id="hueBar" role="slider" aria-label="Hue" aria-valuemin="0" aria-valuemax="360"><div class="knob" id="hueKnob"></div></div>
     <div id="satBar" role="slider" aria-label="Saturation" aria-valuemin="0" aria-valuemax="100"><div class="knob" id="satKnob"></div></div>
@@ -152,6 +168,17 @@
   let practiceRound = 0;
   let practicePauseUntil = 0;
   let practiceDone = false;
+  // Brushes the fly invents for the current practice try. Manual drawing and
+  // the Starry Night button ignore these and keep the solid ribbon.
+  let brushCache = Object.create(null);
+  let brushLayer = null;
+  let brushSnap = null;
+  let strokeOpen = false;
+  let activePts = [];
+  let activeBrush = null;
+  let activeColor = null;
+  let directCount = 0;
+  let inventedLabels = [];
   const touchDevice = navigator.maxTouchPoints > 0;
 
   function hsl() { return `hsl(${hue} ${sat}% ${light}%)`; }
@@ -202,6 +229,8 @@
   document.getElementById('size').oninput = (e) => { size = +e.target.value; };
 
   function resize() {
+    if (strokeOpen) finishStroke();
+    brushCache = Object.create(null);
     const stage = document.getElementById('stage');
     const nextDpr = Math.min(window.devicePixelRatio || 1, 3);
     const cssW = Math.max(1, stage.clientWidth);
@@ -258,6 +287,406 @@
     ctx.fill();
   }
 
+  function clampNum(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  function canvasMetrics() {
+    const w = Math.max(1, canvas.width / dpr);
+    const h = Math.max(1, canvas.height / dpr);
+    return {
+      w: w,
+      h: h,
+      skyGap: h * (0.97 / 19),
+      hillGap: h * (0.24 / 11),
+      flameGap: h / 30
+    };
+  }
+
+  // One invented brush. diameter is CSS pixels, the same unit as the Size slider.
+  function makeBrush(name, diameter, opacity, shape, jitter, role) {
+    const shown = Math.max(1, Math.round(diameter));
+    let phase = 0.4;
+    const key = role || name;
+    for (let i = 0; i < key.length; i++) phase += key.charCodeAt(i) * 0.17;
+    return {
+      name: name,
+      label: name + ' ' + shown + 'px',
+      diameter: shown,
+      radius: shown / 2,
+      opacity: opacity,
+      shape: shape,
+      jitter: jitter || 0,
+      phase: phase
+    };
+  }
+
+  function brushFamily(role) {
+    if (role === 'vein') return 'outline';
+    if (role === 'roof' || role === 'steeple') return 'house';
+    return role || 'mark';
+  }
+
+  // Five kits. Try 1 invents clumsy brushes (scratchy sky, blobby stars).
+  // Each try gets closer. The last kit is the smart one: a big soft sky,
+  // a 2px swirl, a star glow, and a hairline outline.
+  function brushSpec(round, family) {
+    const m = canvasMetrics();
+    const gap = m.skyGap;
+    const g = (mul, lo, hi) => clampNum(gap * mul, lo, hi);
+    const hill = (mul, lo, hi) => clampNum(m.hillGap * mul, lo, hi);
+    const tree = (mul, lo, hi) => clampNum(m.flameGap * mul, lo, hi);
+    const kits = [
+      {
+        sky: ['scratchy sky', g(0.42, 8, 16), 0.48, 'round', 0.6],
+        swirl: ['fat swirl', 20, 1, 'round', 0.4],
+        highlight: ['fat light', 18, 1, 'round', 0.4],
+        star: ['blobby star', 32, 1, 'round', 0.35],
+        starSpin: ['fat swirl', 22, 1, 'round', 0.4],
+        starCore: ['blobby star', 28, 1, 'round', 0.3],
+        moon: ['blobby moon', 26, 1, 'round', 0.3],
+        mountain: ['tiny hill', hill(0.7, 5, 10), 0.65, 'round', 0.5],
+        ground: ['skinny ground', g(0.35, 6, 12), 0.55, 'round', 0.35],
+        house: ['chubby wall', 16, 1, 'round', 0.35],
+        flame: ['blobby tree', tree(0.7, 14, 24), 1, 'round', 0.45],
+        window: ['smear', 10, 0.8, 'round', 0.3],
+        outline: ['lost line', 3, 0.35, 'round', 0.25],
+        mark: ['mystery brush', 14, 1, 'round', 0.4]
+      },
+      {
+        sky: ['streaky sky', g(0.75, 14, 26), 0.72, 'round', 0.32],
+        swirl: ['thick swirl', 11, 1, 'round', 0.22],
+        highlight: ['thick light', 10, 0.85, 'round', 0.2],
+        star: ['puffy star', 18, 1, 'round', 0.22],
+        starSpin: ['thick swirl', 12, 1, 'round', 0.22],
+        starCore: ['puffy star', 14, 1, 'round', 0.15],
+        moon: ['round moon', 16, 1, 'round', 0.12],
+        mountain: ['bumpy hill', hill(1.3, 8, 16), 0.85, 'round', 0.28],
+        ground: ['patchy ground', g(0.7, 12, 20), 0.7, 'round', 0.2],
+        house: ['wobbly wall', 12, 1, 'round', 0.25],
+        flame: ['shaggy tree', tree(0.85, 12, 20), 0.9, 'round', 0.28],
+        window: ['smudge light', 7, 0.9, 'round', 0.1],
+        outline: ['shaky line', 6, 0.85, 'round', 0.3],
+        mark: ['shaky line', 8, 1, 'round', 0.25]
+      },
+      {
+        sky: ['softer sky', g(1.05, 26, 40), 1, 'soft', 0.14],
+        swirl: ['medium swirl', 6, 1, 'taper', 0.1],
+        highlight: ['wind streak', 5, 0.75, 'soft', 0.08],
+        star: ['star glow', 11, 1, 'glow', 0.08],
+        starSpin: ['medium swirl', 5, 1, 'taper', 0.1],
+        starCore: ['star center', 4, 1, 'fine', 0.05],
+        moon: ['moon glow', 13, 1, 'soft', 0.05],
+        mountain: ['wider hill', hill(2.0, 14, 26), 1, 'flat', 0.1],
+        ground: ['darker ground', g(1.1, 18, 32), 1, 'soft', 0.08],
+        house: ['straighter wall', 9, 1, 'flat', 0.08],
+        flame: ['softer tree', tree(1.05, 10, 20), 1, 'soft', 0.1],
+        window: ['little light', 4, 1, 'glow', 0.05],
+        outline: ['thin outline', 3, 1, 'fine', 0.08],
+        mark: ['thin outline', 4, 1, 'fine', 0.08]
+      },
+      {
+        sky: ['big sky', g(1.18, 32, 44), 1, 'soft', 0.05],
+        swirl: ['fine swirl', 3, 1, 'fine', 0.04],
+        highlight: ['soft wind', 5, 0.7, 'soft', 0.03],
+        star: ['star glow', 9, 1, 'glow', 0.03],
+        starSpin: ['fine swirl', 3, 1, 'taper', 0.04],
+        starCore: ['tiny star', 2, 1, 'fine', 0],
+        moon: ['soft moon', 12, 1, 'soft', 0.02],
+        mountain: ['broad slope', hill(2.3, 18, 34), 1, 'flat', 0.04],
+        ground: ['wide ground', g(1.35, 24, 40), 1, 'soft', 0.03],
+        house: ['village wall', 8, 1, 'flat', 0.03],
+        flame: ['soft cypress', tree(1.15, 10, 22), 1, 'soft', 0.04],
+        window: ['window glow', 5, 1, 'glow', 0],
+        outline: ['tiny outline', 2, 1, 'fine', 0.03],
+        mark: ['tiny outline', 2, 1, 'fine', 0]
+      },
+      {
+        sky: ['big sky', g(1.33, 34, 48), 1, 'soft', 0],
+        swirl: ['tiny swirl', 2, 1, 'fine', 0],
+        highlight: ['soft wind', 6, 0.7, 'soft', 0],
+        star: ['star glow', 8, 1, 'glow', 0],
+        starSpin: ['tiny swirl', 2, 1, 'fine', 0],
+        starCore: ['tiny star', 2, 1, 'fine', 0],
+        moon: ['soft moon', 12, 1, 'soft', 0],
+        mountain: ['big slope', hill(2.5, 20, 36), 1, 'flat', 0],
+        ground: ['wide ground', g(1.5, 28, 44), 1, 'soft', 0],
+        house: ['village wall', 8, 1, 'flat', 0],
+        flame: ['soft cypress', tree(1.25, 12, 24), 1, 'soft', 0],
+        window: ['window glow', 5, 1, 'glow', 0],
+        outline: ['tiny outline', 2, 1, 'fine', 0],
+        mark: ['tiny outline', 2, 1, 'fine', 0]
+      }
+    ];
+    const kit = kits[Math.max(0, Math.min(kits.length - 1, round))];
+    return kit[family] || kit.mark;
+  }
+
+  function inventBrush(round, role) {
+    const family = brushFamily(role);
+    const key = round + ':' + family;
+    if (!brushCache[key]) {
+      const spec = brushSpec(round, family);
+      brushCache[key] = makeBrush(spec[0], spec[1], spec[2], spec[3], spec[4], family);
+    }
+    return brushCache[key];
+  }
+
+  function showcaseLabels(round) {
+    const names = ['sky', 'swirl', 'star', 'outline'];
+    const out = [];
+    for (let i = 0; i < names.length; i++) out.push(inventBrush(round, names[i]).label);
+    return out;
+  }
+
+  function setBrushHud(using, made) {
+    const tag = document.getElementById('brushHud');
+    const u = document.getElementById('brushUsing');
+    const m = document.getElementById('brushMade');
+    if (!using && !made) {
+      tag.hidden = true;
+      u.textContent = '';
+      m.textContent = '';
+      delete tag.dataset.using;
+      delete tag.dataset.brushes;
+      return;
+    }
+    tag.hidden = false;
+    u.textContent = using ? ('Brush: ' + using) : '';
+    m.textContent = made ? ('Invented: ' + made) : '';
+    if (using) tag.dataset.using = using;
+    else delete tag.dataset.using;
+    if (made) tag.dataset.brushes = made;
+    else delete tag.dataset.brushes;
+  }
+
+  function hideBrushHud() {
+    inventedLabels = [];
+    setBrushHud('', '');
+  }
+
+  function noteInvented(brush) {
+    setBrushHud(brush.label, inventedLabels.join(' · '));
+  }
+
+  function needsBrushLayer(brush) {
+    if (brush.shape === 'soft' || brush.shape === 'glow' || brush.shape === 'flat' || brush.shape === 'taper') return true;
+    return brush.opacity < 0.98;
+  }
+
+  function pointRadius(brush, i, n) {
+    let scale = 1;
+    if (brush.shape === 'taper') {
+      const t = n <= 1 ? 0.5 : i / (n - 1);
+      scale = 0.35 + 0.65 * Math.sin(t * Math.PI);
+    }
+    if (brush.jitter > 0.001) scale *= 1 + brush.jitter * Math.sin(i * 1.9 + brush.phase);
+    return Math.max(0.7, brush.radius * scale);
+  }
+
+  function colorCss(color, satAdd, lightAdd) {
+    const s = clampNum(color.sat + (satAdd || 0), 0, 100);
+    const l = clampNum(color.light + (lightAdd || 0), 0, 97);
+    return 'hsl(' + color.hue + ' ' + s + '% ' + l + '%)';
+  }
+
+  function brushLayers(brush, color) {
+    const base = colorCss(color, 0, 0);
+    if (brush.shape === 'soft') {
+      return [
+        { scale: 1.85, alpha: 0.26, color: base, cap: 1 },
+        { scale: 1.15, alpha: 0.4, color: base, cap: 1 },
+        { scale: 0.62, alpha: 0.9, color: base, cap: 1 }
+      ];
+    }
+    if (brush.shape === 'glow') {
+      return [
+        { scale: 2.15, alpha: 0.34, color: colorCss(color, -12, 16), cap: 1 },
+        { scale: 0.85, alpha: 0.72, color: base, cap: 1 },
+        { scale: 0.32, alpha: 1, color: colorCss(color, -20, 26), cap: 1 }
+      ];
+    }
+    if (brush.shape === 'flat') {
+      return [{ scale: 1, alpha: brush.opacity, color: base, cap: 0.2 }];
+    }
+    return [{ scale: 1, alpha: brush.opacity, color: base, cap: 1 }];
+  }
+
+  function addStadium(ctx2, x0, y0, r0, x1, y1, r1) {
+    r0 = Math.max(0.6, r0);
+    r1 = Math.max(0.6, r1);
+    const dx = x1 - x0, dy = y1 - y0;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.01) {
+      ctx2.moveTo(x0 + Math.max(r0, r1), y0);
+      ctx2.arc(x0, y0, Math.max(r0, r1), 0, Math.PI * 2);
+      return;
+    }
+    const px = -dy / len, py = dx / len;
+    const left = Math.atan2(py, px);
+    ctx2.moveTo(x0 + Math.cos(left) * r0, y0 + Math.sin(left) * r0);
+    ctx2.arc(x0, y0, r0, left, left + Math.PI, false);
+    ctx2.arc(x1, y1, r1, left + Math.PI, left + Math.PI * 2, false);
+    ctx2.closePath();
+  }
+
+  function addFlatStrip(ctx2, pts, radiusFn) {
+    const left = [];
+    const right = [];
+    for (let i = 0; i < pts.length; i++) {
+      const prev = pts[Math.max(0, i - 1)];
+      const next = pts[Math.min(pts.length - 1, i + 1)];
+      let dx = next.x - prev.x, dy = next.y - prev.y;
+      let len = Math.hypot(dx, dy);
+      if (len < 0.001) { dx = 1; dy = 0; len = 1; }
+      const px = -dy / len, py = dx / len;
+      const r = Math.max(0.6, radiusFn(i));
+      left.push(pts[i].x + px * r, pts[i].y + py * r);
+      right.push(pts[i].x - px * r, pts[i].y - py * r);
+    }
+    ctx2.moveTo(left[0], left[1]);
+    for (let i = 1; i < pts.length; i++) ctx2.lineTo(left[i * 2], left[i * 2 + 1]);
+    for (let i = pts.length - 1; i >= 0; i--) ctx2.lineTo(right[i * 2], right[i * 2 + 1]);
+    ctx2.closePath();
+  }
+
+  function strokeReach(pts) {
+    let max = 0;
+    for (let i = 1; i < pts.length; i++) {
+      max = Math.max(max, Math.hypot(pts[i].x - pts[0].x, pts[i].y - pts[0].y));
+    }
+    return max;
+  }
+
+  // Fills a whole stroke in one pass so soft edges do not stack into dots.
+  function fillBrushShape(ctx2, pts, radiusFn, cap) {
+    if (!pts.length) return;
+    ctx2.beginPath();
+    if (pts.length === 1 || strokeReach(pts) < 0.45) {
+      const r = Math.max(0.6, radiusFn(0));
+      ctx2.moveTo(pts[0].x + r, pts[0].y);
+      ctx2.arc(pts[0].x, pts[0].y, r, 0, Math.PI * 2);
+      ctx2.fill();
+      return;
+    }
+    if (cap < 0.85) addFlatStrip(ctx2, pts, radiusFn);
+    else {
+      for (let i = 1; i < pts.length; i++) {
+        addStadium(ctx2, pts[i - 1].x, pts[i - 1].y, radiusFn(i - 1), pts[i].x, pts[i].y, radiusFn(i));
+      }
+    }
+    ctx2.fill();
+  }
+
+  function ensureBrushBuffers() {
+    if (!brushLayer) {
+      brushLayer = document.createElement('canvas');
+      brushSnap = document.createElement('canvas');
+    }
+    if (brushLayer.width !== canvas.width || brushLayer.height !== canvas.height) {
+      brushLayer.width = canvas.width;
+      brushLayer.height = canvas.height;
+      brushSnap.width = canvas.width;
+      brushSnap.height = canvas.height;
+    }
+  }
+
+  function captureSnap() {
+    ensureBrushBuffers();
+    const sctx = brushSnap.getContext('2d');
+    sctx.setTransform(1, 0, 0, 1, 0, 0);
+    sctx.globalAlpha = 1;
+    sctx.globalCompositeOperation = 'source-over';
+    sctx.clearRect(0, 0, brushSnap.width, brushSnap.height);
+    sctx.drawImage(canvas, 0, 0);
+  }
+
+  function discardStroke() {
+    strokeOpen = false;
+    activePts = [];
+    activeBrush = null;
+    activeColor = null;
+    directCount = 0;
+  }
+
+  function renderActiveStroke() {
+    if (!strokeOpen || !activeBrush || !activePts.length) return;
+    const brush = activeBrush;
+    const color = activeColor;
+    hue = color.hue;
+    sat = color.sat;
+    light = color.light;
+    if (!needsBrushLayer(brush)) {
+      paintDirectNewPoints(brush);
+      return;
+    }
+    ensureBrushBuffers();
+    const lctx = brushLayer.getContext('2d');
+    lctx.setTransform(1, 0, 0, 1, 0, 0);
+    lctx.globalAlpha = 1;
+    lctx.globalCompositeOperation = 'source-over';
+    lctx.clearRect(0, 0, brushLayer.width, brushLayer.height);
+    lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const layers = brushLayers(brush, color);
+    const n = activePts.length;
+    for (let k = 0; k < layers.length; k++) {
+      const layer = layers[k];
+      lctx.globalAlpha = layer.alpha;
+      lctx.fillStyle = layer.color;
+      fillBrushShape(lctx, activePts, (i) => pointRadius(brush, i, n) * layer.scale, layer.cap);
+    }
+    lctx.globalAlpha = 1;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(brushSnap, 0, 0);
+    ctx.drawImage(brushLayer, 0, 0);
+    ctx.restore();
+  }
+
+  function paintDirectNewPoints(brush) {
+    const pts = activePts;
+    const n = pts.length;
+    ctx.save();
+    ctx.globalAlpha = 1;
+    if (directCount === 0) {
+      const r = pointRadius(brush, 0, n);
+      fillRibbon(pts[0].x, pts[0].y, r, pts[0].x, pts[0].y, r);
+      directCount = 1;
+    }
+    for (let i = directCount; i < n; i++) {
+      fillRibbon(
+        pts[i - 1].x, pts[i - 1].y, pointRadius(brush, i - 1, n),
+        pts[i].x, pts[i].y, pointRadius(brush, i, n)
+      );
+    }
+    directCount = n;
+    ctx.restore();
+  }
+
+  function finishStroke() {
+    if (!strokeOpen) return;
+    renderActiveStroke();
+    discardStroke();
+  }
+
+  function beginStroke(color, brush) {
+    finishStroke();
+    activeBrush = brush;
+    activeColor = { hue: color.hue, sat: color.sat, light: color.light };
+    activePts = [];
+    directCount = 0;
+    strokeOpen = true;
+    noteInvented(brush);
+    if (needsBrushLayer(brush)) captureSnap();
+  }
+
+  function queueFlyPoint(x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const prev = activePts.length ? activePts[activePts.length - 1] : null;
+    if (prev && Math.hypot(x - prev.x, y - prev.y) < 0.12) return;
+    activePts.push({ x: x, y: y });
+  }
+
   function drawTo(x, y) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     const w = size;
@@ -306,6 +735,7 @@
     if (!practiceDone) return;
     practiceDone = false;
     setPracticeText('');
+    hideBrushHud();
   }
 
   function onPointerDown(e) {
@@ -381,11 +811,10 @@
   canvas.addEventListener('touchcancel', onTouchUp, { passive: false });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  // Autopilot is the fly practicing Starry Night. Same composition as
-  // buildStarryPlan, but each stroke is a jittery pursuit instead of a
-  // straight ribbon. Every finished try starts over with a smaller wobble
-  // until the last one is almost on the plan. The Starry Night button
-  // still plays that clean plan once.
+  // Autopilot is the fly practicing Starry Night. Same paths as
+  // buildStarryPlan, but each try he invents brushes and (early on) wobbles.
+  // The last try holds the path and uses his smart brushes. The Starry Night
+  // button still plays the clean fixed-width ribbons once.
   function starryScreen(p) {
     const w = canvas.width / dpr;
     const h = canvas.height / dpr;
@@ -396,17 +825,9 @@
       r: Math.max(0.8, (p.rw || 0) * w + (p.rh || 0) * h + (p.rm || 0) * m),
       hue: p.hue,
       sat: p.sat,
-      light: p.light
+      light: p.light,
+      role: p.role || 'mark'
     };
-  }
-
-  function paintFly(x, y, r, color) {
-    hue = color.hue;
-    sat = color.sat;
-    light = color.light;
-    if (!autoLast) fillRibbon(x, y, r, x, y, r);
-    else fillRibbon(autoLast.x, autoLast.y, autoLast.r, x, y, r);
-    autoLast = { x, y, r };
   }
 
   function practiceSkill() {
@@ -437,8 +858,10 @@
     const wobble = practiceSkill();
     // Last try traces the plan exactly. Earlier tries miss by a distance
     // that does not shrink with stroke width, so stars and edges show it.
+    // Brush size comes from the fly's invented brush, not the plan radius.
     if (wobble <= 0) {
-      paintFly(target.x, target.y, target.r, target);
+      queueFlyPoint(target.x, target.y);
+      autoLast = { x: target.x, y: target.y };
       return;
     }
     const w = canvas.width / dpr;
@@ -452,14 +875,16 @@
     const x1 = target.x + ox;
     const y1 = target.y + oy;
     if (!autoLast) {
-      paintFly(x1, y1, target.r, target);
+      queueFlyPoint(x1, y1);
+      autoLast = { x: x1, y: y1 };
       return;
     }
-    const x0 = autoLast.x, y0 = autoLast.y, r0 = autoLast.r;
+    const x0 = autoLast.x, y0 = autoLast.y;
     const dx = x1 - x0, dy = y1 - y0;
     const len = Math.hypot(dx, dy);
     if (len < 0.4) {
-      paintFly(x1, y1, target.r, target);
+      queueFlyPoint(x1, y1);
+      autoLast = { x: x1, y: y1 };
       return;
     }
     const px = -dy / len, py = dx / len;
@@ -468,18 +893,24 @@
     const cx = (x0 + x1) / 2 + px * bow;
     const cy = (y0 + y1) / 2 + py * bow;
     const steps = Math.max(2, Math.min(7, Math.ceil(len / 7)));
+    let lx = x1, ly = y1;
     for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       const u = 1 - t;
       const x = u * u * x0 + 2 * u * t * cx + t * t * x1;
       const y = u * u * y0 + 2 * u * t * cy + t * t * y1;
       const buzz = Math.sin(flyPhase * 6.5 + t * 11) * Math.min(amp * 0.22, 1.6);
-      const r = r0 + (target.r - r0) * t;
-      paintFly(x + px * buzz, y + py * buzz, r, target);
+      lx = x + px * buzz;
+      ly = y + py * buzz;
+      queueFlyPoint(lx, ly);
     }
+    autoLast = { x: lx, y: ly };
   }
 
   function beginPracticeRound(round) {
+    discardStroke();
+    brushCache = Object.create(null);
+    inventedLabels = [];
     practiceRound = round;
     practicePauseUntil = 0;
     clearCanvas();
@@ -490,13 +921,24 @@
     autoLast = null;
     const word = PRACTICE_WORDS[Math.min(round, PRACTICE_WORDS.length - 1)];
     setPracticeText(practiceDots() + '  Practice ' + (round + 1) + ' of ' + PRACTICE_LEVELS.length + ' · ' + word);
+    const made = showcaseLabels(round);
+    inventedLabels = made.slice();
+    setBrushHud(made[0], made.join(' · '));
   }
 
   function finishPractice() {
+    finishStroke();
     practiceDone = true;
     practicePauseUntil = 0;
     setAuto(false, { finished: true });
     setPracticeText(practiceDots() + "  Really good! The fly's Starry Night is clean.");
+  }
+
+  function ensureFlyStroke(target) {
+    const brush = inventBrush(practiceRound, target.role);
+    const same = strokeOpen && activeBrush === brush && activeColor &&
+      activeColor.hue === target.hue && activeColor.sat === target.sat && activeColor.light === target.light;
+    if (!same) beginStroke(target, brush);
   }
 
   function stepFly(ts) {
@@ -518,18 +960,27 @@
     if (n > 40) n = 40;
     while (n > 0 && flyIdx < flyPlan.length) {
       const raw = flyPlan[flyIdx++];
-      if (raw.lift) autoLast = null;
-      flyToward(starryScreen(raw));
+      if (raw.lift) {
+        finishStroke();
+        autoLast = null;
+      }
+      const target = starryScreen(raw);
+      ensureFlyStroke(target);
+      flyToward(target);
       n--;
     }
     if (flyIdx >= flyPlan.length) {
+      finishStroke();
       if (practiceRound >= PRACTICE_LEVELS.length - 1) finishPractice();
       else {
         practicePauseUntil = now + (reduceMotion ? 400 : 1600);
         const nextWord = PRACTICE_WORDS[Math.min(practiceRound + 1, PRACTICE_WORDS.length - 1)];
         setPracticeText(practiceDots() + '  Practice ' + (practiceRound + 1) + ' of ' + PRACTICE_LEVELS.length + ' done. Next: ' + nextWord + '.');
       }
-    } else updateColorUI();
+    } else {
+      renderActiveStroke();
+      updateColorUI();
+    }
   }
 
   // Stylized Starry Night, drawn with the same filled ribbons as a finger.
@@ -555,7 +1006,8 @@
           nx: p.nx, ny: p.ny, ox: p.ox || 0, oy: p.oy || 0,
           rw: st.rw || 0, rh: st.rh || 0, rm: st.rm || 0,
           hue: hueV, sat: satV, light: lightV,
-          lift: i === 0
+          lift: i === 0,
+          role: st.role || 'mark'
         });
       }
     }
@@ -614,20 +1066,21 @@
         rh: step * 0.9,
         hue: 228 + Math.sin(row * 1.17) * 12,
         sat: 72 + (row % 3) * 6,
-        light: 14 + t * 8 + (row % 4) * 2
+        light: 14 + t * 8 + (row % 4) * 2,
+        role: 'sky'
       });
     }
 
-    addRoll(-0.02, 1.02, 0.16, 0.04, 1.15, 0.4, 42, { rh: 0.02, hue: 208, sat: 58, light: 58 });
-    addRoll(-0.02, 1.02, 0.30, 0.048, 0.95, 1.7, 44, { rh: 0.022, hue: 222, sat: 76, light: 40 });
-    addRoll(0.0, 1.0, 0.46, 0.036, 1.25, 0.8, 40, { rh: 0.018, hue: 198, sat: 50, light: 54 });
-    addRoll(0.12, 0.72, 0.12, 0.018, 1.0, 0.2, 28, { rh: 0.01, rm: 0.006, hue: 50, sat: 42, light: 82 });
+    addRoll(-0.02, 1.02, 0.16, 0.04, 1.15, 0.4, 42, { rh: 0.02, hue: 208, sat: 58, light: 58, role: 'swirl' });
+    addRoll(-0.02, 1.02, 0.30, 0.048, 0.95, 1.7, 44, { rh: 0.022, hue: 222, sat: 76, light: 40, role: 'swirl' });
+    addRoll(0.0, 1.0, 0.46, 0.036, 1.25, 0.8, 40, { rh: 0.018, hue: 198, sat: 50, light: 54, role: 'swirl' });
+    addRoll(0.12, 0.72, 0.12, 0.018, 1.0, 0.2, 28, { rh: 0.01, rm: 0.006, hue: 50, sat: 42, light: 82, role: 'highlight' });
 
-    spiral(0.42, 0.26, 0.02, 0.19, 1.7, 78, { rm: 0.03, hue: 212, sat: 72, light: 50 });
-    spiral(0.42, 0.26, 0.015, 0.11, -1.35, 52, { rm: 0.016, hue: 50, sat: 38, light: 84 });
-    spiral(0.67, 0.20, 0.015, 0.12, -1.45, 60, { rm: 0.024, hue: 224, sat: 68, light: 46 });
-    spiral(0.40, 0.50, 0.012, 0.10, 1.2, 48, { rm: 0.02, hue: 206, sat: 60, light: 48 });
-    arc(0.84, 0.145, 0.115, 0.2, 5.6, 32, { rm: 0.016, hue: 206, sat: 48, light: 66 });
+    spiral(0.42, 0.26, 0.02, 0.19, 1.7, 78, { rm: 0.03, hue: 212, sat: 72, light: 50, role: 'swirl' });
+    spiral(0.42, 0.26, 0.015, 0.11, -1.35, 52, { rm: 0.016, hue: 50, sat: 38, light: 84, role: 'swirl' });
+    spiral(0.67, 0.20, 0.015, 0.12, -1.45, 60, { rm: 0.024, hue: 224, sat: 68, light: 46, role: 'swirl' });
+    spiral(0.40, 0.50, 0.012, 0.10, 1.2, 48, { rm: 0.02, hue: 206, sat: 60, light: 48, role: 'swirl' });
+    arc(0.84, 0.145, 0.115, 0.2, 5.6, 32, { rm: 0.016, hue: 206, sat: 48, light: 66, role: 'swirl' });
 
     const peakX = 0.62, peakY = 0.60, baseY = 0.84, left = 0.20, right = 1.0;
     const mRows = 11;
@@ -636,13 +1089,14 @@
       const y = peakY + (baseY - peakY) * t;
       seg(peakX - (peakX - left) * t, y, peakX + (right - peakX) * t, y, {
         rh: (baseY - peakY) / mRows * 0.85,
-        hue: 226, sat: 55, light: 28 - t * 8
+        hue: 226, sat: 55, light: 28 - t * 8,
+        role: 'mountain'
       });
     }
 
-    ring(0.835, 0.15, 0.10, 28, { rm: 0.02, hue: 46, sat: 55, light: 70 });
-    arc(0.835, 0.15, 0.072, -2.35, 2.05, 32, { rm: 0.032, hue: 44, sat: 88, light: 66 });
-    arc(0.835, 0.15, 0.058, -2.15, 1.85, 24, { rm: 0.016, hue: 52, sat: 30, light: 92 });
+    ring(0.835, 0.15, 0.10, 28, { rm: 0.02, hue: 46, sat: 55, light: 70, role: 'moon' });
+    arc(0.835, 0.15, 0.072, -2.35, 2.05, 32, { rm: 0.032, hue: 44, sat: 88, light: 66, role: 'moon' });
+    arc(0.835, 0.15, 0.058, -2.15, 1.85, 24, { rm: 0.016, hue: 52, sat: 30, light: 92, role: 'moon' });
 
     const stars = [
       [0.22, 0.09, 0.042, 1],
@@ -659,9 +1113,9 @@
     ];
     for (let s = 0; s < stars.length; s++) {
       const cx = stars[s][0], cy = stars[s][1], scale = stars[s][2], spin = stars[s][3];
-      ring(cx, cy, scale * 1.22, 24, { rm: scale * 0.36, hue: 48, sat: 58, light: 74 });
-      spiral(cx, cy, scale * 0.08, scale * 1.02, 1.3 * spin, 30, { rm: scale * 0.24, hue: 46, sat: 96, light: 60 });
-      ring(cx, cy, scale * 0.28, 12, { rm: scale * 0.2, hue: 52, sat: 22, light: 93 });
+      ring(cx, cy, scale * 1.22, 24, { rm: scale * 0.36, hue: 48, sat: 58, light: 74, role: 'star' });
+      spiral(cx, cy, scale * 0.08, scale * 1.02, 1.3 * spin, 30, { rm: scale * 0.24, hue: 46, sat: 96, light: 60, role: 'starSpin' });
+      ring(cx, cy, scale * 0.28, 12, { rm: scale * 0.2, hue: 52, sat: 22, light: 93, role: 'starCore' });
     }
 
     for (let b = 0; b < 6; b++) {
@@ -669,13 +1123,14 @@
         rh: 0.04,
         hue: 224,
         sat: 42 - b * 2,
-        light: 16 - b
+        light: 16 - b,
+        role: 'ground'
       });
     }
 
     function addWindow(x, y0, y1) {
-      seg(x, (y0 + y1) / 2, x, (y0 + y1) / 2, { rw: 0.02, hue: 46, sat: 75, light: 52 });
-      seg(x, y0, x, y1, { rw: 0.012, hue: 52, sat: 35, light: 90 });
+      seg(x, (y0 + y1) / 2, x, (y0 + y1) / 2, { rw: 0.02, hue: 46, sat: 75, light: 52, role: 'window' });
+      seg(x, y0, x, y1, { rw: 0.012, hue: 52, sat: 35, light: 90, role: 'window' });
     }
     function addHouse(cx, base, hw, bodyH, roofH, roofHue) {
       const wallTop = base - bodyH;
@@ -685,7 +1140,8 @@
         const y = base - bodyH * (i / ribs);
         seg(cx - hw, y, cx + hw, y, {
           rh: bodyH / ribs * 0.85,
-          hue: 222, sat: 36, light: 13 + (i % 2) * 2
+          hue: 222, sat: 36, light: 13 + (i % 2) * 2,
+          role: 'house'
         });
       }
       const rr = 4;
@@ -695,7 +1151,8 @@
         const half = hw * (1 - t * 0.92);
         seg(cx - half, y, cx + half, y, {
           rh: roofH / rr * 0.9,
-          hue: roofHue, sat: 48, light: 22
+          hue: roofHue, sat: 48, light: 22,
+          role: 'roof'
         });
       }
       addStroke([
@@ -704,7 +1161,7 @@
         { nx: cx, ny: peak },
         { nx: cx + hw, ny: wallTop },
         { nx: cx + hw, ny: base }
-      ], { rw: 0.007, hue: 230, sat: 28, light: 8 });
+      ], { rw: 0.007, hue: 230, sat: 28, light: 8, role: 'outline' });
       const winY = wallTop + bodyH * 0.28;
       const winH = Math.min(0.028, bodyH * 0.38);
       if (hw >= 0.046) {
@@ -725,7 +1182,8 @@
         const hw = 0.005 + 0.024 * t;
         seg(cx - hw, y, cx + hw, y, {
           rh: (footY - tipY) / sRows * 0.95,
-          hue: 228, sat: 30, light: 10
+          hue: 228, sat: 30, light: 10,
+          role: 'steeple'
         });
       }
       addStroke([
@@ -733,9 +1191,9 @@
         { nx: cx - 0.03, ny: footY },
         { nx: cx + 0.03, ny: footY },
         { nx: cx, ny: tipY }
-      ], { rw: 0.006, hue: 232, sat: 22, light: 7 });
-      seg(cx, tipY + 0.055, cx, tipY + 0.085, { rw: 0.007, hue: 50, sat: 70, light: 78 });
-      seg(cx, base - 0.04, cx, base - 0.004, { rw: 0.01, hue: 32, sat: 40, light: 24 });
+      ], { rw: 0.006, hue: 232, sat: 22, light: 7, role: 'outline' });
+      seg(cx, tipY + 0.055, cx, tipY + 0.085, { rw: 0.007, hue: 50, sat: 70, light: 78, role: 'window' });
+      seg(cx, base - 0.04, cx, base - 0.004, { rw: 0.01, hue: 32, sat: 40, light: 24, role: 'outline' });
     }
 
     addHouse(0.36, 0.90, 0.042, 0.058, 0.04, 24);
@@ -745,7 +1203,7 @@
     addHouse(0.82, 0.91, 0.04, 0.058, 0.038, 258);
     addHouse(0.915, 0.915, 0.034, 0.048, 0.032, 28);
 
-    seg(-0.05, 0.985, 1.05, 0.985, { rh: 0.045, hue: 222, sat: 34, light: 8 });
+    seg(-0.05, 0.985, 1.05, 0.985, { rh: 0.045, hue: 222, sat: 34, light: 8, role: 'ground' });
 
     function addFlame(cx, tipY, baseY, halfTip, halfBase, hueV, lightV) {
       const n = 30;
@@ -766,13 +1224,14 @@
           rh: ((baseY - tipY) / n) * 1.05,
           hue: hueV + (i % 3) * 4,
           sat: 32,
-          light: lightV + (i % 4)
+          light: lightV + (i % 4),
+          role: 'flame'
         });
         left.push({ nx: x - half, ny: y });
         right.push({ nx: x + half, ny: y });
       }
-      addStroke(left, { rw: 0.008, hue: hueV + 15, sat: 28, light: lightV + 10 });
-      addStroke(right, { rw: 0.007, hue: 190, sat: 22, light: lightV + 14 });
+      addStroke(left, { rw: 0.008, hue: hueV + 15, sat: 28, light: lightV + 10, role: 'outline' });
+      addStroke(right, { rw: 0.007, hue: 190, sat: 22, light: lightV + 14, role: 'outline' });
     }
     addFlame(0.145, 0.02, 1.02, 0.004, 0.095, 158, 7);
     addFlame(0.095, 0.20, 1.0, 0.003, 0.05, 168, 6);
@@ -782,7 +1241,7 @@
       const t = i / 26;
       vein.push({ nx: 0.14 + Math.sin(t * 7.5) * 0.028, ny: 0.08 + t * 0.88 });
     }
-    addStroke(vein, { rw: 0.01, hue: 172, sat: 30, light: 18 });
+    addStroke(vein, { rw: 0.01, hue: 172, sat: 30, light: 18, role: 'vein' });
 
     return plan;
   }
@@ -826,6 +1285,7 @@
   function startStarry() {
     if (starryOn) return;
     if (autoOn) setAuto(false);
+    hideBrushHud();
     practiceDone = false;
     setPracticeText('Playing the clean Starry Night.');
     savedColor = { hue, sat, light };
@@ -865,6 +1325,7 @@
   function setAuto(on, opts) {
     opts = opts || {};
     if (on && starryOn) stopStarry(true);
+    if (!on) finishStroke();
     autoOn = !!on;
     btnAuto.classList.toggle('active', autoOn);
     btnAuto.setAttribute('aria-pressed', autoOn ? 'true' : 'false');
@@ -889,6 +1350,7 @@
       practiceDone = false;
       practiceRound = 0;
       setPracticeText('');
+      hideBrushHud();
     }
     if (savedColor && !starryOn) {
       hue = savedColor.hue;
@@ -916,6 +1378,8 @@
   document.getElementById('btnClear').onclick = () => {
     if (starryOn) stopStarry(true);
     if (autoOn) setAuto(false);
+    discardStroke();
+    hideBrushHud();
     practiceDone = false;
     practiceRound = 0;
     setPracticeText('');
