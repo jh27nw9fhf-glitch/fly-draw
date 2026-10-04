@@ -75,6 +75,19 @@
     font-size: 14px; font-weight: 700; line-height: 1.35;
     border-bottom: 1px solid #e9d5ff;
   }
+  #inventRow {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 8px 10px;
+    background: #faf5ff; border-bottom: 2px solid #c084fc;
+  }
+  #btnInvent {
+    flex: none; min-height: 44px; border: 2px solid #c084fc;
+    background: #ffffff; color: #6b21a8;
+  }
+  #btnInvent[aria-pressed="true"] { background: #c084fc; color: #1a0b2e; }
+  #inventHint {
+    margin: 0; flex: 1; min-width: 160px;
+    font-size: 13px; font-weight: 700; color: #6b21a8; line-height: 1.3;
+  }
   #brushHud {
     margin: 0; padding: 2px 12px 7px;
     background: #f3e8ff; color: #6b21a8;
@@ -82,10 +95,6 @@
     border-bottom: 1px solid #e9d5ff;
   }
   #brushHud[hidden] { display: none; }
-  #brushUsing, #brushMade {
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  #brushMade { font-weight: 600; color: #7c3aed; }
 </style>
 </head>
 <body>
@@ -104,17 +113,18 @@
       <input id="size" type="range" min="4" max="48" value="14" />
     </div>
     <div class="actions">
-      <button id="btnAuto" type="button" aria-pressed="false" title="The fly invents his own brushes and practices Starry Night">Autopilot</button>
+      <button id="btnAuto" type="button" aria-pressed="false" title="The fly practices Starry Night until he gets really good">Autopilot</button>
       <button id="btnStarry" type="button" aria-pressed="false" title="Paint The Starry Night">Starry Night</button>
       <button id="btnClear" class="danger" type="button">Clear</button>
       <button id="btnSave" type="button">Save</button>
     </div>
   </div>
-  <p id="practiceNote" role="status" aria-live="polite">The fly practices Starry Night until he's really good.</p>
-  <div id="brushHud" hidden>
-    <div id="brushUsing"></div>
-    <div id="brushMade"></div>
+  <div id="inventRow">
+    <button id="btnInvent" type="button" aria-pressed="false" aria-describedby="inventHint" title="Turn this on and the fly invents brush size and shape while it practices">Fly makes brushes</button>
+    <p id="inventHint">Off. Turn this on and the fly decides brush size and shape while it practices.</p>
   </div>
+  <p id="practiceNote" role="status" aria-live="polite">The fly practices Starry Night until he's really good.</p>
+  <p id="brushHud" hidden>The fly has not made a brush yet.</p>
   <div id="colors">
     <div id="hueBar" role="slider" aria-label="Hue" aria-valuemin="0" aria-valuemax="360"><div class="knob" id="hueKnob"></div></div>
     <div id="satBar" role="slider" aria-label="Saturation" aria-valuemin="0" aria-valuemax="100"><div class="knob" id="satKnob"></div></div>
@@ -135,6 +145,8 @@
   const lightInput = document.getElementById('light');
   const btnAuto = document.getElementById('btnAuto');
   const btnStarry = document.getElementById('btnStarry');
+  const btnInvent = document.getElementById('btnInvent');
+  const inventHint = document.getElementById('inventHint');
   let hue = 280, sat = 80, light = 55, size = 14, dpr = 1;
   let drawing = false;
   let pointerId = null;
@@ -168,9 +180,16 @@
   let practiceRound = 0;
   let practicePauseUntil = 0;
   let practiceDone = false;
-  // Brushes the fly invents for the current practice try. Manual drawing and
-  // the Starry Night button ignore these and keep the solid ribbon.
-  let brushCache = Object.create(null);
+  // Off by default. When on, Autopilot invents brush size and shape during
+  // the practice run. Finger drawing and the Starry Night button stay ribbons.
+  let inventOn = false;
+  // First-try brush for each stroke, remembered so later tries refine it
+  // instead of rolling a new preset.
+  let clumsyMemory = Object.create(null);
+  let roundFirstBrush = null;
+  let roundMinD = 0;
+  let roundMaxD = 0;
+  let roundShapeKeys = Object.create(null);
   let brushLayer = null;
   let brushSnap = null;
   let strokeOpen = false;
@@ -178,7 +197,6 @@
   let activeBrush = null;
   let activeColor = null;
   let directCount = 0;
-  let inventedLabels = [];
   const touchDevice = navigator.maxTouchPoints > 0;
 
   function hsl() { return `hsl(${hue} ${sat}% ${light}%)`; }
@@ -230,7 +248,6 @@
 
   function resize() {
     if (strokeOpen) finishStroke();
-    brushCache = Object.create(null);
     const stage = document.getElementById('stage');
     const nextDpr = Math.min(window.devicePixelRatio || 1, 3);
     const cssW = Math.max(1, stage.clientWidth);
@@ -289,197 +306,243 @@
 
   function clampNum(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
-  function canvasMetrics() {
+  function unitRand(seed, salt) {
+    let x = (seed + salt * 747796405) >>> 0;
+    x = Math.imul(x ^ (x >>> 16), 2246822507) >>> 0;
+    x = Math.imul(x ^ (x >>> 13), 3266489909) >>> 0;
+    x = (x ^ (x >>> 16)) >>> 0;
+    return x / 4294967296;
+  }
+
+  function mixSeed(stats) {
+    let s = (stats.start + 1) * 1315423911 + Math.round(stats.meanR * 10) * 374761393;
+    s ^= Math.round(stats.meanL * 3) * 668265263;
+    return s >>> 0;
+  }
+
+  // What this stroke is, measured when the fly reaches it. No brush names.
+  function measureStroke(start) {
     const w = Math.max(1, canvas.width / dpr);
     const h = Math.max(1, canvas.height / dpr);
-    return {
-      w: w,
-      h: h,
-      skyGap: h * (0.97 / 19),
-      hillGap: h * (0.24 / 11),
-      flameGap: h / 30
-    };
-  }
-
-  // One invented brush. diameter is CSS pixels, the same unit as the Size slider.
-  function makeBrush(name, diameter, opacity, shape, jitter, role) {
-    const shown = Math.max(1, Math.round(diameter));
-    let phase = 0.4;
-    const key = role || name;
-    for (let i = 0; i < key.length; i++) phase += key.charCodeAt(i) * 0.17;
-    return {
-      name: name,
-      label: name + ' ' + shown + 'px',
-      diameter: shown,
-      radius: shown / 2,
-      opacity: opacity,
-      shape: shape,
-      jitter: jitter || 0,
-      phase: phase
-    };
-  }
-
-  function brushFamily(role) {
-    if (role === 'vein') return 'outline';
-    if (role === 'roof' || role === 'steeple') return 'house';
-    return role || 'mark';
-  }
-
-  // Five kits. Try 1 invents clumsy brushes (scratchy sky, blobby stars).
-  // Each try gets closer. The last kit is the smart one: a big soft sky,
-  // a 2px swirl, a star glow, and a hairline outline.
-  function brushSpec(round, family) {
-    const m = canvasMetrics();
-    const gap = m.skyGap;
-    const g = (mul, lo, hi) => clampNum(gap * mul, lo, hi);
-    const hill = (mul, lo, hi) => clampNum(m.hillGap * mul, lo, hi);
-    const tree = (mul, lo, hi) => clampNum(m.flameGap * mul, lo, hi);
-    const kits = [
-      {
-        sky: ['scratchy sky', g(0.42, 8, 16), 0.48, 'round', 0.6],
-        swirl: ['fat swirl', 20, 1, 'round', 0.4],
-        highlight: ['fat light', 18, 1, 'round', 0.4],
-        star: ['blobby star', 32, 1, 'round', 0.35],
-        starSpin: ['fat swirl', 22, 1, 'round', 0.4],
-        starCore: ['blobby star', 28, 1, 'round', 0.3],
-        moon: ['blobby moon', 26, 1, 'round', 0.3],
-        mountain: ['tiny hill', hill(0.7, 5, 10), 0.65, 'round', 0.5],
-        ground: ['skinny ground', g(0.35, 6, 12), 0.55, 'round', 0.35],
-        house: ['chubby wall', 16, 1, 'round', 0.35],
-        flame: ['blobby tree', tree(0.7, 14, 24), 1, 'round', 0.45],
-        window: ['smear', 10, 0.8, 'round', 0.3],
-        outline: ['lost line', 3, 0.35, 'round', 0.25],
-        mark: ['mystery brush', 14, 1, 'round', 0.4]
-      },
-      {
-        sky: ['streaky sky', g(0.75, 14, 26), 0.72, 'round', 0.32],
-        swirl: ['thick swirl', 11, 1, 'round', 0.22],
-        highlight: ['thick light', 10, 0.85, 'round', 0.2],
-        star: ['puffy star', 18, 1, 'round', 0.22],
-        starSpin: ['thick swirl', 12, 1, 'round', 0.22],
-        starCore: ['puffy star', 14, 1, 'round', 0.15],
-        moon: ['round moon', 16, 1, 'round', 0.12],
-        mountain: ['bumpy hill', hill(1.3, 8, 16), 0.85, 'round', 0.28],
-        ground: ['patchy ground', g(0.7, 12, 20), 0.7, 'round', 0.2],
-        house: ['wobbly wall', 12, 1, 'round', 0.25],
-        flame: ['shaggy tree', tree(0.85, 12, 20), 0.9, 'round', 0.28],
-        window: ['smudge light', 7, 0.9, 'round', 0.1],
-        outline: ['shaky line', 6, 0.85, 'round', 0.3],
-        mark: ['shaky line', 8, 1, 'round', 0.25]
-      },
-      {
-        sky: ['softer sky', g(1.05, 26, 40), 1, 'soft', 0.14],
-        swirl: ['medium swirl', 6, 1, 'taper', 0.1],
-        highlight: ['wind streak', 5, 0.75, 'soft', 0.08],
-        star: ['star glow', 11, 1, 'glow', 0.08],
-        starSpin: ['medium swirl', 5, 1, 'taper', 0.1],
-        starCore: ['star center', 4, 1, 'fine', 0.05],
-        moon: ['moon glow', 13, 1, 'soft', 0.05],
-        mountain: ['wider hill', hill(2.0, 14, 26), 1, 'flat', 0.1],
-        ground: ['darker ground', g(1.1, 18, 32), 1, 'soft', 0.08],
-        house: ['straighter wall', 9, 1, 'flat', 0.08],
-        flame: ['softer tree', tree(1.05, 10, 20), 1, 'soft', 0.1],
-        window: ['little light', 4, 1, 'glow', 0.05],
-        outline: ['thin outline', 3, 1, 'fine', 0.08],
-        mark: ['thin outline', 4, 1, 'fine', 0.08]
-      },
-      {
-        sky: ['big sky', g(1.18, 32, 44), 1, 'soft', 0.05],
-        swirl: ['fine swirl', 3, 1, 'fine', 0.04],
-        highlight: ['soft wind', 5, 0.7, 'soft', 0.03],
-        star: ['star glow', 9, 1, 'glow', 0.03],
-        starSpin: ['fine swirl', 3, 1, 'taper', 0.04],
-        starCore: ['tiny star', 2, 1, 'fine', 0],
-        moon: ['soft moon', 12, 1, 'soft', 0.02],
-        mountain: ['broad slope', hill(2.3, 18, 34), 1, 'flat', 0.04],
-        ground: ['wide ground', g(1.35, 24, 40), 1, 'soft', 0.03],
-        house: ['village wall', 8, 1, 'flat', 0.03],
-        flame: ['soft cypress', tree(1.15, 10, 22), 1, 'soft', 0.04],
-        window: ['window glow', 5, 1, 'glow', 0],
-        outline: ['tiny outline', 2, 1, 'fine', 0.03],
-        mark: ['tiny outline', 2, 1, 'fine', 0]
-      },
-      {
-        sky: ['big sky', g(1.33, 34, 48), 1, 'soft', 0],
-        swirl: ['tiny swirl', 2, 1, 'fine', 0],
-        highlight: ['soft wind', 6, 0.7, 'soft', 0],
-        star: ['star glow', 8, 1, 'glow', 0],
-        starSpin: ['tiny swirl', 2, 1, 'fine', 0],
-        starCore: ['tiny star', 2, 1, 'fine', 0],
-        moon: ['soft moon', 12, 1, 'soft', 0],
-        mountain: ['big slope', hill(2.5, 20, 36), 1, 'flat', 0],
-        ground: ['wide ground', g(1.5, 28, 44), 1, 'soft', 0],
-        house: ['village wall', 8, 1, 'flat', 0],
-        flame: ['soft cypress', tree(1.25, 12, 24), 1, 'soft', 0],
-        window: ['window glow', 5, 1, 'glow', 0],
-        outline: ['tiny outline', 2, 1, 'fine', 0],
-        mark: ['tiny outline', 2, 1, 'fine', 0]
+    const m = Math.min(w, h);
+    let n = 0, sumR = 0, sumL = 0, length = 0, turn = 0;
+    let prev = null, prevAng = null;
+    for (let i = start; i < flyPlan.length; i++) {
+      const p = flyPlan[i];
+      if (i > start && p.lift) break;
+      const x = p.nx * w + (p.ox || 0) * m;
+      const y = p.ny * h + (p.oy || 0) * m;
+      const r = Math.max(0.8, (p.rw || 0) * w + (p.rh || 0) * h + (p.rm || 0) * m);
+      if (prev) {
+        const dx = x - prev.x, dy = y - prev.y;
+        const step = Math.hypot(dx, dy);
+        length += step;
+        if (step > 0.5) {
+          const ang = Math.atan2(dy, dx);
+          if (prevAng != null) {
+            let d = ang - prevAng;
+            while (d > Math.PI) d -= Math.PI * 2;
+            while (d < -Math.PI) d += Math.PI * 2;
+            turn += Math.abs(d);
+          }
+          prevAng = ang;
+        }
       }
-    ];
-    const kit = kits[Math.max(0, Math.min(kits.length - 1, round))];
-    return kit[family] || kit.mark;
-  }
-
-  function inventBrush(round, role) {
-    const family = brushFamily(role);
-    const key = round + ':' + family;
-    if (!brushCache[key]) {
-      const spec = brushSpec(round, family);
-      brushCache[key] = makeBrush(spec[0], spec[1], spec[2], spec[3], spec[4], family);
+      prev = { x: x, y: y };
+      sumR += r;
+      sumL += p.light;
+      n++;
     }
-    return brushCache[key];
+    return {
+      start: start,
+      n: n,
+      meanR: n ? sumR / n : 8,
+      meanL: n ? sumL / n : 50,
+      length: length,
+      turn: turn
+    };
   }
 
-  function showcaseLabels(round) {
-    const names = ['sky', 'swirl', 'star', 'outline'];
-    const out = [];
-    for (let i = 0; i < names.length; i++) out.push(inventBrush(round, names[i]).label);
-    return out;
+  // A brush that fits the stroke the fly is about to draw. Numbers only.
+  function goalBrush(stats) {
+    const wide = stats.meanR >= 10;
+    const thin = stats.meanR <= 5.5;
+    const bright = stats.meanL >= 62;
+    const curvy = stats.length > 18 && (stats.turn / Math.max(1, stats.length)) > 0.02;
+    return {
+      diameter: clampNum(stats.meanR * 2, 2, 64),
+      opacity: 1,
+      edge: wide ? 0.84 : (bright ? 0.42 : 0.1),
+      taper: (thin && curvy) ? 0.74 : (curvy ? 0.3 : 0.04),
+      flat: (wide && !bright) ? 0.72 : 0.05,
+      core: (bright && !wide) ? 0.86 : (bright ? 0.34 : 0.02),
+      jitter: 0
+    };
   }
 
-  function setBrushHud(using, made) {
-    const tag = document.getElementById('brushHud');
-    const u = document.getElementById('brushUsing');
-    const m = document.getElementById('brushMade');
-    if (!using && !made) {
-      tag.hidden = true;
-      u.textContent = '';
-      m.textContent = '';
-      delete tag.dataset.using;
-      delete tag.dataset.brushes;
-      return;
+  // The fly's first guess for this stroke. Size and shape are rolled from
+  // the stroke itself, then pushed away from the fit so try 1 is different.
+  function clumsyBrush(stats, seed) {
+    const goal = goalBrush(stats);
+    let swing = 0.34 + unitRand(seed, 1) * 2.35;
+    if (swing > 0.8 && swing < 1.25) swing = unitRand(seed, 8) < 0.5 ? 0.48 : 1.9;
+    const brush = {
+      diameter: clampNum(goal.diameter * swing, 2, 72),
+      opacity: 0.3 + unitRand(seed, 2) * 0.7,
+      edge: unitRand(seed, 3),
+      taper: unitRand(seed, 4),
+      flat: unitRand(seed, 5),
+      core: unitRand(seed, 6),
+      jitter: 0.35 + unitRand(seed, 7) * 0.55,
+      phase: unitRand(seed, 11) * Math.PI * 2
+    };
+    const keys = ['edge', 'taper', 'flat', 'core'];
+    let far = false;
+    for (let i = 0; i < keys.length; i++) {
+      if (Math.abs(brush[keys[i]] - goal[keys[i]]) > 0.28) far = true;
     }
-    tag.hidden = false;
-    u.textContent = using ? ('Brush: ' + using) : '';
-    m.textContent = made ? ('Invented: ' + made) : '';
-    if (using) tag.dataset.using = using;
-    else delete tag.dataset.using;
-    if (made) tag.dataset.brushes = made;
-    else delete tag.dataset.brushes;
+    if (!far) brush.edge = goal.edge > 0.5 ? 0.05 : 0.95;
+    if (Math.abs(brush.diameter - goal.diameter) < 4) {
+      brush.diameter = clampNum(goal.diameter + (unitRand(seed, 9) < 0.5 ? -18 : 22), 2, 72);
+    }
+    return brush;
+  }
+
+  function mixBrush(a, b, k) {
+    function m(p) { return a[p] + (b[p] - a[p]) * k; }
+    return {
+      diameter: Math.max(2, Math.round(m('diameter'))),
+      opacity: m('opacity'),
+      edge: m('edge'),
+      taper: m('taper'),
+      flat: m('flat'),
+      core: m('core'),
+      jitter: m('jitter'),
+      phase: a.phase
+    };
+  }
+
+  function practiceBlend(round) {
+    const i = Math.max(0, Math.min(PRACTICE_LEVELS.length - 1, round));
+    const skill = 1 - PRACTICE_LEVELS[i];
+    return skill * skill * (3 - 2 * skill);
+  }
+
+  // Called when a stroke starts during practice. Later tries keep the same
+  // first guess and move its size and shape toward a fit for this stroke.
+  function decideBrush(round, stats) {
+    const key = String(stats.start);
+    if (!clumsyMemory[key]) clumsyMemory[key] = clumsyBrush(stats, mixSeed(stats));
+    return mixBrush(clumsyMemory[key], goalBrush(stats), practiceBlend(round));
+  }
+
+  function shapeKey(brush) {
+    return [
+      brush.edge > 0.55 ? 'feather' : 'hard',
+      brush.taper > 0.45 ? 'taper' : 'even',
+      brush.flat > 0.55 ? 'flat' : 'round',
+      brush.core > 0.45 ? 'core' : 'plain'
+    ].join('-');
+  }
+
+  function describeBrush(brush) {
+    const bits = [brush.diameter + 'px'];
+    if (brush.flat > 0.55) bits.push('flat');
+    else if (brush.edge > 0.55) bits.push('feathered');
+    else bits.push('round');
+    if (brush.taper > 0.45) bits.push('tapered');
+    if (brush.core > 0.45) bits.push('bright middle');
+    if (brush.jitter > 0.18) bits.push('uneven');
+    if (brush.opacity < 0.75) bits.push('thin paint');
+    return bits.join(' ');
   }
 
   function hideBrushHud() {
-    inventedLabels = [];
-    setBrushHud('', '');
+    const tag = document.getElementById('brushHud');
+    tag.hidden = true;
+    tag.textContent = 'The fly has not made a brush yet.';
+    const names = [
+      'diameter', 'edge', 'taper', 'flat', 'core', 'jitter', 'opacity', 'shape', 'round',
+      'firstDiameter', 'firstShape', 'firstEdge', 'firstTaper', 'firstFlat', 'firstCore', 'firstJitter',
+      'minDiameter', 'maxDiameter', 'shapeCount'
+    ];
+    for (let i = 0; i < names.length; i++) delete tag.dataset[names[i]];
   }
 
-  function noteInvented(brush) {
-    setBrushHud(brush.label, inventedLabels.join(' · '));
+  function publishBrush(brush) {
+    const tag = document.getElementById('brushHud');
+    tag.hidden = false;
+    tag.textContent = 'Fly made this brush: ' + describeBrush(brush);
+    tag.dataset.diameter = String(brush.diameter);
+    tag.dataset.edge = brush.edge.toFixed(3);
+    tag.dataset.taper = brush.taper.toFixed(3);
+    tag.dataset.flat = brush.flat.toFixed(3);
+    tag.dataset.core = brush.core.toFixed(3);
+    tag.dataset.jitter = brush.jitter.toFixed(3);
+    tag.dataset.opacity = brush.opacity.toFixed(3);
+    tag.dataset.shape = shapeKey(brush);
+    tag.dataset.round = String(practiceRound + 1);
+    if (roundFirstBrush) {
+      tag.dataset.firstDiameter = String(roundFirstBrush.diameter);
+      tag.dataset.firstShape = shapeKey(roundFirstBrush);
+      tag.dataset.firstEdge = roundFirstBrush.edge.toFixed(3);
+      tag.dataset.firstTaper = roundFirstBrush.taper.toFixed(3);
+      tag.dataset.firstFlat = roundFirstBrush.flat.toFixed(3);
+      tag.dataset.firstCore = roundFirstBrush.core.toFixed(3);
+      tag.dataset.firstJitter = roundFirstBrush.jitter.toFixed(3);
+    }
+    tag.dataset.minDiameter = String(roundMinD);
+    tag.dataset.maxDiameter = String(roundMaxD);
+    tag.dataset.shapeCount = String(Object.keys(roundShapeKeys).length);
+  }
+
+  function trackRoundBrush(brush) {
+    if (!roundFirstBrush) {
+      roundFirstBrush = brush;
+      roundMinD = brush.diameter;
+      roundMaxD = brush.diameter;
+    } else {
+      if (brush.diameter < roundMinD) roundMinD = brush.diameter;
+      if (brush.diameter > roundMaxD) roundMaxD = brush.diameter;
+    }
+    roundShapeKeys[shapeKey(brush)] = 1;
+    publishBrush(brush);
+  }
+
+  function setInvent(on) {
+    inventOn = !!on;
+    btnInvent.classList.toggle('active', inventOn);
+    btnInvent.setAttribute('aria-pressed', inventOn ? 'true' : 'false');
+    btnInvent.textContent = inventOn ? 'Fly makes brushes: on' : 'Fly makes brushes';
+    inventHint.textContent = inventOn
+      ? 'On. During practice the fly picks size and shape, and later tries get closer.'
+      : 'Off. Turn this on and the fly decides brush size and shape while it practices.';
+    try { localStorage.setItem('purpleDrawInventBrushes', inventOn ? '1' : '0'); } catch (_) {}
+    if (autoOn) {
+      finishStroke();
+      autoLast = null;
+    }
+    if (!inventOn) hideBrushHud();
   }
 
   function needsBrushLayer(brush) {
-    if (brush.shape === 'soft' || brush.shape === 'glow' || brush.shape === 'flat' || brush.shape === 'taper') return true;
-    return brush.opacity < 0.98;
+    if (brush.opacity < 0.98) return true;
+    if (brush.edge > 0.08) return true;
+    if (brush.core > 0.12) return true;
+    if (brush.taper > 0.08) return true;
+    if (brush.flat > 0.55) return true;
+    return false;
   }
 
   function pointRadius(brush, i, n) {
     let scale = 1;
-    if (brush.shape === 'taper') {
+    if (brush.taper > 0.08) {
       const t = n <= 1 ? 0.5 : i / (n - 1);
-      scale = 0.35 + 0.65 * Math.sin(t * Math.PI);
+      const belly = Math.sin(t * Math.PI);
+      scale = (1 - brush.taper) + brush.taper * (0.25 + 0.75 * belly);
     }
-    if (brush.jitter > 0.001) scale *= 1 + brush.jitter * Math.sin(i * 1.9 + brush.phase);
-    return Math.max(0.7, brush.radius * scale);
+    if (brush.jitter > 0.02) scale *= 1 + brush.jitter * Math.sin(i * 1.9 + (brush.phase || 0));
+    return Math.max(0.7, (brush.diameter / 2) * scale);
   }
 
   function colorCss(color, satAdd, lightAdd) {
@@ -490,24 +553,26 @@
 
   function brushLayers(brush, color) {
     const base = colorCss(color, 0, 0);
-    if (brush.shape === 'soft') {
-      return [
-        { scale: 1.85, alpha: 0.26, color: base, cap: 1 },
-        { scale: 1.15, alpha: 0.4, color: base, cap: 1 },
-        { scale: 0.62, alpha: 0.9, color: base, cap: 1 }
-      ];
+    const cap = brush.flat > 0.55 ? 0.2 : 1;
+    const layers = [];
+    if (brush.edge > 0.08) {
+      layers.push({
+        scale: 1 + brush.edge * 1.35,
+        alpha: 0.16 + brush.edge * 0.24,
+        color: base,
+        cap: cap
+      });
     }
-    if (brush.shape === 'glow') {
-      return [
-        { scale: 2.15, alpha: 0.34, color: colorCss(color, -12, 16), cap: 1 },
-        { scale: 0.85, alpha: 0.72, color: base, cap: 1 },
-        { scale: 0.32, alpha: 1, color: colorCss(color, -20, 26), cap: 1 }
-      ];
+    layers.push({ scale: 1, alpha: brush.opacity, color: base, cap: cap });
+    if (brush.core > 0.12) {
+      layers.push({
+        scale: 0.28 + (1 - brush.core) * 0.4,
+        alpha: 0.55 + brush.core * 0.45,
+        color: colorCss(color, -18, 16 + brush.core * 18),
+        cap: 1
+      });
     }
-    if (brush.shape === 'flat') {
-      return [{ scale: 1, alpha: brush.opacity, color: base, cap: 0.2 }];
-    }
-    return [{ scale: 1, alpha: brush.opacity, color: base, cap: 1 }];
+    return layers;
   }
 
   function addStadium(ctx2, x0, y0, r0, x1, y1, r1) {
@@ -676,7 +741,7 @@
     activePts = [];
     directCount = 0;
     strokeOpen = true;
-    noteInvented(brush);
+    trackRoundBrush(brush);
     if (needsBrushLayer(brush)) captureSnap();
   }
 
@@ -811,10 +876,10 @@
   canvas.addEventListener('touchcancel', onTouchUp, { passive: false });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  // Autopilot is the fly practicing Starry Night. Same paths as
-  // buildStarryPlan, but each try he invents brushes and (early on) wobbles.
-  // The last try holds the path and uses his smart brushes. The Starry Night
-  // button still plays the clean fixed-width ribbons once.
+  // Autopilot practices Starry Night five times. Early tries wobble. The last
+  // try follows the plan. With "Fly makes brushes" on, each try also decides
+  // brush size and shape, and later tries move closer to a fit for the stroke.
+  // The Starry Night button still plays the clean fixed-width ribbons once.
   function starryScreen(p) {
     const w = canvas.width / dpr;
     const h = canvas.height / dpr;
@@ -854,14 +919,19 @@
     }
   }
 
-  function flyToward(target) {
+  function paintFly(x, y, r, color) {
+    hue = color.hue;
+    sat = color.sat;
+    light = color.light;
+    if (!autoLast) fillRibbon(x, y, r, x, y, r);
+    else fillRibbon(autoLast.x, autoLast.y, autoLast.r, x, y, r);
+    autoLast = { x: x, y: y, r: r };
+  }
+
+  function flyWobble(target, place) {
     const wobble = practiceSkill();
-    // Last try traces the plan exactly. Earlier tries miss by a distance
-    // that does not shrink with stroke width, so stars and edges show it.
-    // Brush size comes from the fly's invented brush, not the plan radius.
     if (wobble <= 0) {
-      queueFlyPoint(target.x, target.y);
-      autoLast = { x: target.x, y: target.y };
+      place(target.x, target.y, target.r);
       return;
     }
     const w = canvas.width / dpr;
@@ -875,16 +945,15 @@
     const x1 = target.x + ox;
     const y1 = target.y + oy;
     if (!autoLast) {
-      queueFlyPoint(x1, y1);
-      autoLast = { x: x1, y: y1 };
+      place(x1, y1, target.r);
       return;
     }
     const x0 = autoLast.x, y0 = autoLast.y;
+    const r0 = autoLast.r == null ? target.r : autoLast.r;
     const dx = x1 - x0, dy = y1 - y0;
     const len = Math.hypot(dx, dy);
     if (len < 0.4) {
-      queueFlyPoint(x1, y1);
-      autoLast = { x: x1, y: y1 };
+      place(x1, y1, target.r);
       return;
     }
     const px = -dy / len, py = dx / len;
@@ -893,24 +962,34 @@
     const cx = (x0 + x1) / 2 + px * bow;
     const cy = (y0 + y1) / 2 + py * bow;
     const steps = Math.max(2, Math.min(7, Math.ceil(len / 7)));
-    let lx = x1, ly = y1;
     for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       const u = 1 - t;
       const x = u * u * x0 + 2 * u * t * cx + t * t * x1;
       const y = u * u * y0 + 2 * u * t * cy + t * t * y1;
       const buzz = Math.sin(flyPhase * 6.5 + t * 11) * Math.min(amp * 0.22, 1.6);
-      lx = x + px * buzz;
-      ly = y + py * buzz;
-      queueFlyPoint(lx, ly);
+      const r = r0 + (target.r - r0) * t;
+      place(x + px * buzz, y + py * buzz, r);
     }
-    autoLast = { x: lx, y: ly };
+  }
+
+  function flyTowardRibbon(target) {
+    flyWobble(target, (x, y, r) => { paintFly(x, y, r, target); });
+  }
+
+  function flyTowardBrush(target) {
+    flyWobble(target, (x, y) => {
+      queueFlyPoint(x, y);
+      autoLast = { x: x, y: y };
+    });
   }
 
   function beginPracticeRound(round) {
     discardStroke();
-    brushCache = Object.create(null);
-    inventedLabels = [];
+    roundFirstBrush = null;
+    roundMinD = 0;
+    roundMaxD = 0;
+    roundShapeKeys = Object.create(null);
     practiceRound = round;
     practicePauseUntil = 0;
     clearCanvas();
@@ -921,9 +1000,11 @@
     autoLast = null;
     const word = PRACTICE_WORDS[Math.min(round, PRACTICE_WORDS.length - 1)];
     setPracticeText(practiceDots() + '  Practice ' + (round + 1) + ' of ' + PRACTICE_LEVELS.length + ' · ' + word);
-    const made = showcaseLabels(round);
-    inventedLabels = made.slice();
-    setBrushHud(made[0], made.join(' · '));
+    if (inventOn) {
+      const tag = document.getElementById('brushHud');
+      tag.hidden = false;
+      tag.textContent = 'Fly is deciding brushes for practice ' + (round + 1) + '…';
+    }
   }
 
   function finishPractice() {
@@ -934,11 +1015,9 @@
     setPracticeText(practiceDots() + "  Really good! The fly's Starry Night is clean.");
   }
 
-  function ensureFlyStroke(target) {
-    const brush = inventBrush(practiceRound, target.role);
-    const same = strokeOpen && activeBrush === brush && activeColor &&
-      activeColor.hue === target.hue && activeColor.sat === target.sat && activeColor.light === target.light;
-    if (!same) beginStroke(target, brush);
+  function openInventedStroke(target, startIdx) {
+    const stats = measureStroke(startIdx);
+    beginStroke(target, decideBrush(practiceRound, stats));
   }
 
   function stepFly(ts) {
@@ -960,27 +1039,32 @@
     if (n > 40) n = 40;
     while (n > 0 && flyIdx < flyPlan.length) {
       const raw = flyPlan[flyIdx++];
-      if (raw.lift) {
-        finishStroke();
-        autoLast = null;
-      }
       const target = starryScreen(raw);
-      ensureFlyStroke(target);
-      flyToward(target);
+      if (inventOn) {
+        if (raw.lift || !strokeOpen) {
+          if (strokeOpen) finishStroke();
+          autoLast = null;
+          openInventedStroke(target, flyIdx - 1);
+        }
+        flyTowardBrush(target);
+      } else {
+        if (raw.lift) autoLast = null;
+        flyTowardRibbon(target);
+      }
       n--;
     }
     if (flyIdx >= flyPlan.length) {
-      finishStroke();
+      if (inventOn) finishStroke();
       if (practiceRound >= PRACTICE_LEVELS.length - 1) finishPractice();
       else {
         practicePauseUntil = now + (reduceMotion ? 400 : 1600);
         const nextWord = PRACTICE_WORDS[Math.min(practiceRound + 1, PRACTICE_WORDS.length - 1)];
         setPracticeText(practiceDots() + '  Practice ' + (practiceRound + 1) + ' of ' + PRACTICE_LEVELS.length + ' done. Next: ' + nextWord + '.');
       }
-    } else {
+    } else if (inventOn) {
       renderActiveStroke();
       updateColorUI();
-    }
+    } else updateColorUI();
   }
 
   // Stylized Starry Night, drawn with the same filled ribbons as a finger.
@@ -1337,6 +1421,7 @@
     if (autoOn) {
       practiceDone = false;
       savedColor = { hue, sat, light };
+      clumsyMemory = Object.create(null);
       beginPracticeRound(0);
       return;
     }
@@ -1362,6 +1447,7 @@
   }
 
   btnAuto.onclick = () => setAuto(!autoOn);
+  btnInvent.onclick = () => setInvent(!inventOn);
   btnStarry.onclick = () => {
     if (starryOn) stopStarry(true);
     else startStarry();
@@ -1396,7 +1482,14 @@
   updateColorUI();
   resize();
   clearCanvas();
-  if ((new URLSearchParams(location.search).get('painting') || '').toLowerCase() === 'starry') {
+  const bootParams = new URLSearchParams(location.search);
+  let inventPref = false;
+  try { inventPref = localStorage.getItem('purpleDrawInventBrushes') === '1'; } catch (_) {}
+  const inventQuery = (bootParams.get('invent') || '').toLowerCase();
+  if (inventQuery === '1' || inventQuery === 'on') inventPref = true;
+  if (inventQuery === '0' || inventQuery === 'off') inventPref = false;
+  if (inventPref) setInvent(true);
+  if ((bootParams.get('painting') || '').toLowerCase() === 'starry') {
     startStarry();
   }
   requestAnimationFrame(tick);
