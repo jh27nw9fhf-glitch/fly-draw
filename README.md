@@ -1,2 +1,2 @@
-# fly-draw
-Fly Draw — fruit fly brain drawing app for Ryder
+# Fly Draw
+Open https://jh27nw9fhf-glitch.github.io/fly-draw/
