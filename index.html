@@ -86,6 +86,7 @@
     </div>
     <div class="actions">
       <button id="btnAuto" type="button" aria-pressed="false">Autopilot</button>
+      <button id="btnStarry" type="button" aria-pressed="false" title="Paint The Starry Night">Starry Night</button>
       <button id="btnClear" class="danger" type="button">Clear</button>
       <button id="btnSave" type="button">Save</button>
     </div>
@@ -109,12 +110,18 @@
   const satKnob = document.getElementById('satKnob');
   const lightInput = document.getElementById('light');
   const btnAuto = document.getElementById('btnAuto');
+  const btnStarry = document.getElementById('btnStarry');
   let hue = 280, sat = 80, light = 55, size = 14, dpr = 1;
   let drawing = false;
   let pointerId = null;
   let touchId = null;
   let last = null;
   let autoOn = false;
+  let starryOn = false;
+  let starryPlan = [];
+  let starryIdx = 0;
+  let starryLast = null;
+  let starryLastTs = 0;
   let picking = false;
   let savedColor = null;
   let autoLast = null;
@@ -136,7 +143,7 @@
     satBar.setAttribute('aria-valuenow', String(Math.round(sat)));
   }
   function rememberPick() {
-    if (autoOn && savedColor) savedColor = { hue, sat, light };
+    if ((autoOn || starryOn) && savedColor) savedColor = { hue, sat, light };
   }
   function bindBar(el, apply) {
     function at(e) {
@@ -275,7 +282,7 @@
 
   function onPointerDown(e) {
     if (touchDevice && e.pointerType === 'touch') return;
-    if (autoOn) { e.preventDefault(); return; }
+    if (autoOn || starryOn) { e.preventDefault(); return; }
     if (pointerId !== null || touchId !== null) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     e.preventDefault();
@@ -305,7 +312,7 @@
   }
 
   function onTouchDown(e) {
-    if (autoOn) { e.preventDefault(); return; }
+    if (autoOn || starryOn) { e.preventDefault(); return; }
     if (touchId !== null || pointerId !== null) return;
     e.preventDefault();
     const p = touchPoint(e, false);
@@ -416,7 +423,334 @@
     paintAuto(ax, ay);
   }
 
+  // Stylized Starry Night, drawn with the same filled ribbons as a finger.
+  // nx/ny cover the canvas. ox/oy/rm are fractions of the short side so the
+  // moon, stars, and swirls stay round on a phone or a wide window.
+  const STARRY_MS = (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) ? 700 : 12000;
+
+  function buildStarryPlan() {
+    const plan = [];
+    let seed = 42;
+    function rnd() {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    }
+    function addStroke(pts, st) {
+      const hueV = ((st.hue % 360) + 360) % 360;
+      const satV = Math.max(0, Math.min(100, st.sat));
+      const lightV = Math.max(0, Math.min(96, st.light));
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i];
+        plan.push({
+          nx: p.nx, ny: p.ny, ox: p.ox || 0, oy: p.oy || 0,
+          rw: st.rw || 0, rh: st.rh || 0, rm: st.rm || 0,
+          hue: hueV, sat: satV, light: lightV,
+          lift: i === 0
+        });
+      }
+    }
+    function seg(x0, y0, x1, y1, st) {
+      addStroke([{ nx: x0, ny: y0 }, { nx: x1, ny: y1 }], st);
+    }
+    function addRoll(x0, x1, y, amp, freq, phase, steps, st) {
+      const pts = [];
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const x = x0 + (x1 - x0) * t;
+        const yy = y + Math.sin(t * Math.PI * 2 * freq + phase) * amp;
+        pts.push({ nx: x, ny: yy });
+      }
+      addStroke(pts, st);
+    }
+    function spiral(cx, cy, r0, r1, turns, steps, st) {
+      const pts = [];
+      const spin = turns < 0 ? -1 : 1;
+      const nTurns = Math.abs(turns);
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const a = spin * t * nTurns * Math.PI * 2 - Math.PI / 2;
+        const rad = r0 + (r1 - r0) * t;
+        pts.push({ nx: cx, ny: cy, ox: Math.cos(a) * rad, oy: Math.sin(a) * rad });
+      }
+      addStroke(pts, st);
+    }
+    function arc(cx, cy, rad, a0, a1, steps, st) {
+      const pts = [];
+      for (let i = 0; i <= steps; i++) {
+        const a = a0 + (a1 - a0) * (i / steps);
+        pts.push({ nx: cx, ny: cy, ox: Math.cos(a) * rad, oy: Math.sin(a) * rad });
+      }
+      addStroke(pts, st);
+    }
+    function ring(cx, cy, rad, steps, st) {
+      arc(cx, cy, rad, 0, Math.PI * 2, steps, st);
+    }
+
+    const rows = 20;
+    const y0 = -0.03;
+    const y1 = 0.94;
+    const step = (y1 - y0) / (rows - 1);
+    for (let row = 0; row < rows; row++) {
+      const t = row / (rows - 1);
+      const y = y0 + step * row;
+      const pts = [];
+      const n = 22;
+      for (let i = 0; i <= n; i++) {
+        const x = -0.05 + 1.1 * (i / n);
+        const yy = y + Math.sin(x * 5.2 + row * 0.85) * 0.012 + (rnd() - 0.5) * 0.004;
+        pts.push({ nx: x, ny: yy });
+      }
+      addStroke(pts, {
+        rh: step * 0.9,
+        hue: 228 + Math.sin(row * 1.17) * 12,
+        sat: 72 + (row % 3) * 6,
+        light: 14 + t * 8 + (row % 4) * 2
+      });
+    }
+
+    addRoll(-0.02, 1.02, 0.16, 0.04, 1.15, 0.4, 42, { rh: 0.02, hue: 208, sat: 58, light: 58 });
+    addRoll(-0.02, 1.02, 0.30, 0.048, 0.95, 1.7, 44, { rh: 0.022, hue: 222, sat: 76, light: 40 });
+    addRoll(0.0, 1.0, 0.46, 0.036, 1.25, 0.8, 40, { rh: 0.018, hue: 198, sat: 50, light: 54 });
+    addRoll(0.12, 0.72, 0.12, 0.018, 1.0, 0.2, 28, { rh: 0.01, rm: 0.006, hue: 50, sat: 42, light: 82 });
+
+    spiral(0.42, 0.26, 0.02, 0.19, 1.7, 78, { rm: 0.03, hue: 212, sat: 72, light: 50 });
+    spiral(0.42, 0.26, 0.015, 0.11, -1.35, 52, { rm: 0.016, hue: 50, sat: 38, light: 84 });
+    spiral(0.67, 0.20, 0.015, 0.12, -1.45, 60, { rm: 0.024, hue: 224, sat: 68, light: 46 });
+    spiral(0.40, 0.50, 0.012, 0.10, 1.2, 48, { rm: 0.02, hue: 206, sat: 60, light: 48 });
+    arc(0.84, 0.145, 0.115, 0.2, 5.6, 32, { rm: 0.016, hue: 206, sat: 48, light: 66 });
+
+    const peakX = 0.62, peakY = 0.60, baseY = 0.84, left = 0.20, right = 1.0;
+    const mRows = 11;
+    for (let i = 0; i <= mRows; i++) {
+      const t = i / mRows;
+      const y = peakY + (baseY - peakY) * t;
+      seg(peakX - (peakX - left) * t, y, peakX + (right - peakX) * t, y, {
+        rh: (baseY - peakY) / mRows * 0.85,
+        hue: 226, sat: 55, light: 28 - t * 8
+      });
+    }
+
+    ring(0.835, 0.15, 0.10, 28, { rm: 0.02, hue: 46, sat: 55, light: 70 });
+    arc(0.835, 0.15, 0.072, -2.35, 2.05, 32, { rm: 0.032, hue: 44, sat: 88, light: 66 });
+    arc(0.835, 0.15, 0.058, -2.15, 1.85, 24, { rm: 0.016, hue: 52, sat: 30, light: 92 });
+
+    const stars = [
+      [0.22, 0.09, 0.042, 1],
+      [0.34, 0.17, 0.058, -1],
+      [0.50, 0.10, 0.034, 1],
+      [0.57, 0.24, 0.062, -1],
+      [0.70, 0.11, 0.032, 1],
+      [0.91, 0.30, 0.044, -1],
+      [0.40, 0.33, 0.04, 1],
+      [0.64, 0.37, 0.046, -1],
+      [0.30, 0.45, 0.028, 1],
+      [0.78, 0.44, 0.032, -1],
+      [0.48, 0.49, 0.026, 1]
+    ];
+    for (let s = 0; s < stars.length; s++) {
+      const cx = stars[s][0], cy = stars[s][1], scale = stars[s][2], spin = stars[s][3];
+      ring(cx, cy, scale * 1.22, 24, { rm: scale * 0.36, hue: 48, sat: 58, light: 74 });
+      spiral(cx, cy, scale * 0.08, scale * 1.02, 1.3 * spin, 30, { rm: scale * 0.24, hue: 46, sat: 96, light: 60 });
+      ring(cx, cy, scale * 0.28, 12, { rm: scale * 0.2, hue: 52, sat: 22, light: 93 });
+    }
+
+    for (let b = 0; b < 6; b++) {
+      addRoll(-0.04, 1.04, 0.73 + b * 0.048, 0.018, 1.1 + b * 0.12, b * 0.9, 26, {
+        rh: 0.04,
+        hue: 224,
+        sat: 42 - b * 2,
+        light: 16 - b
+      });
+    }
+
+    function addWindow(x, y0, y1) {
+      seg(x, (y0 + y1) / 2, x, (y0 + y1) / 2, { rw: 0.02, hue: 46, sat: 75, light: 52 });
+      seg(x, y0, x, y1, { rw: 0.012, hue: 52, sat: 35, light: 90 });
+    }
+    function addHouse(cx, base, hw, bodyH, roofH, roofHue) {
+      const wallTop = base - bodyH;
+      const peak = wallTop - roofH;
+      const ribs = 5;
+      for (let i = 0; i <= ribs; i++) {
+        const y = base - bodyH * (i / ribs);
+        seg(cx - hw, y, cx + hw, y, {
+          rh: bodyH / ribs * 0.85,
+          hue: 222, sat: 36, light: 13 + (i % 2) * 2
+        });
+      }
+      const rr = 4;
+      for (let i = 0; i <= rr; i++) {
+        const t = i / rr;
+        const y = wallTop - roofH * t;
+        const half = hw * (1 - t * 0.92);
+        seg(cx - half, y, cx + half, y, {
+          rh: roofH / rr * 0.9,
+          hue: roofHue, sat: 48, light: 22
+        });
+      }
+      addStroke([
+        { nx: cx - hw, ny: base },
+        { nx: cx - hw, ny: wallTop },
+        { nx: cx, ny: peak },
+        { nx: cx + hw, ny: wallTop },
+        { nx: cx + hw, ny: base }
+      ], { rw: 0.007, hue: 230, sat: 28, light: 8 });
+      const winY = wallTop + bodyH * 0.28;
+      const winH = Math.min(0.028, bodyH * 0.38);
+      if (hw >= 0.046) {
+        addWindow(cx - hw * 0.38, winY, winY + winH);
+        addWindow(cx + hw * 0.38, winY, winY + winH);
+      } else {
+        addWindow(cx, winY, winY + winH);
+      }
+    }
+    function addChurch(cx, base) {
+      addHouse(cx, base, 0.062, 0.082, 0.04, 238);
+      const tipY = 0.45;
+      const footY = base - 0.09;
+      const sRows = 16;
+      for (let i = 0; i <= sRows; i++) {
+        const t = i / sRows;
+        const y = tipY + (footY - tipY) * t;
+        const hw = 0.005 + 0.024 * t;
+        seg(cx - hw, y, cx + hw, y, {
+          rh: (footY - tipY) / sRows * 0.95,
+          hue: 228, sat: 30, light: 10
+        });
+      }
+      addStroke([
+        { nx: cx, ny: tipY },
+        { nx: cx - 0.03, ny: footY },
+        { nx: cx + 0.03, ny: footY },
+        { nx: cx, ny: tipY }
+      ], { rw: 0.006, hue: 232, sat: 22, light: 7 });
+      seg(cx, tipY + 0.055, cx, tipY + 0.085, { rw: 0.007, hue: 50, sat: 70, light: 78 });
+      seg(cx, base - 0.04, cx, base - 0.004, { rw: 0.01, hue: 32, sat: 40, light: 24 });
+    }
+
+    addHouse(0.36, 0.90, 0.042, 0.058, 0.04, 24);
+    addHouse(0.46, 0.895, 0.05, 0.072, 0.048, 252);
+    addChurch(0.585, 0.905);
+    addHouse(0.71, 0.90, 0.052, 0.08, 0.05, 18);
+    addHouse(0.82, 0.91, 0.04, 0.058, 0.038, 258);
+    addHouse(0.915, 0.915, 0.034, 0.048, 0.032, 28);
+
+    seg(-0.05, 0.985, 1.05, 0.985, { rh: 0.045, hue: 222, sat: 34, light: 8 });
+
+    function addFlame(cx, tipY, baseY, halfTip, halfBase, hueV, lightV) {
+      const n = 30;
+      const left = [];
+      const right = [];
+      for (let i = 0; i <= n; i++) {
+        const t = i / n;
+        const y = tipY + (baseY - tipY) * Math.pow(t, 0.9);
+        const sway = Math.sin(t * 6.3 + cx * 18) * (0.01 + 0.022 * t);
+        const half = halfTip + (halfBase - halfTip) * Math.pow(t, 0.7);
+        const x = cx + sway;
+        const bend = Math.sin(t * 16 + cx) * 0.007;
+        addStroke([
+          { nx: x - half, ny: y },
+          { nx: x, ny: y + bend },
+          { nx: x + half, ny: y - bend }
+        ], {
+          rh: ((baseY - tipY) / n) * 1.05,
+          hue: hueV + (i % 3) * 4,
+          sat: 32,
+          light: lightV + (i % 4)
+        });
+        left.push({ nx: x - half, ny: y });
+        right.push({ nx: x + half, ny: y });
+      }
+      addStroke(left, { rw: 0.008, hue: hueV + 15, sat: 28, light: lightV + 10 });
+      addStroke(right, { rw: 0.007, hue: 190, sat: 22, light: lightV + 14 });
+    }
+    addFlame(0.145, 0.02, 1.02, 0.004, 0.095, 158, 7);
+    addFlame(0.095, 0.20, 1.0, 0.003, 0.05, 168, 6);
+    addFlame(0.195, 0.30, 0.98, 0.003, 0.042, 148, 8);
+    const vein = [];
+    for (let i = 0; i <= 26; i++) {
+      const t = i / 26;
+      vein.push({ nx: 0.14 + Math.sin(t * 7.5) * 0.028, ny: 0.08 + t * 0.88 });
+    }
+    addStroke(vein, { rw: 0.01, hue: 172, sat: 30, light: 18 });
+
+    return plan;
+  }
+
+  function paintStarryPoint(p) {
+    const w = canvas.width / dpr;
+    const h = canvas.height / dpr;
+    if (w < 2 || h < 2) return;
+    const m = Math.min(w, h);
+    const x = p.nx * w + (p.ox || 0) * m;
+    const y = p.ny * h + (p.oy || 0) * m;
+    const r = Math.max(0.8, (p.rw || 0) * w + (p.rh || 0) * h + (p.rm || 0) * m);
+    hue = p.hue;
+    sat = p.sat;
+    light = p.light;
+    if (p.lift || !starryLast) fillRibbon(x, y, r, x, y, r);
+    else fillRibbon(starryLast.x, starryLast.y, starryLast.r, x, y, r);
+    starryLast = { x, y, r };
+  }
+
+  function stopStarry(restore) {
+    const was = starryOn;
+    starryOn = false;
+    starryPlan = [];
+    starryIdx = 0;
+    starryLast = null;
+    starryLastTs = 0;
+    btnStarry.classList.remove('active');
+    btnStarry.setAttribute('aria-pressed', 'false');
+    btnStarry.textContent = 'Starry Night';
+    if (restore && was && savedColor && !autoOn) {
+      hue = savedColor.hue;
+      sat = savedColor.sat;
+      light = savedColor.light;
+      savedColor = null;
+      updateColorUI();
+    }
+  }
+
+  function startStarry() {
+    if (starryOn) return;
+    if (autoOn) setAuto(false);
+    savedColor = { hue, sat, light };
+    clearCanvas();
+    starryPlan = buildStarryPlan();
+    starryIdx = 0;
+    starryLast = null;
+    starryLastTs = 0;
+    starryOn = true;
+    btnStarry.classList.add('active');
+    btnStarry.setAttribute('aria-pressed', 'true');
+    btnStarry.textContent = 'Stop Night';
+    drawing = false;
+    pointerId = null;
+    touchId = null;
+    last = null;
+  }
+
+  function stepStarry(ts) {
+    if (!starryPlan.length) { stopStarry(true); return; }
+    const now = ts || performance.now();
+    let dt = starryLastTs ? now - starryLastTs : 16;
+    starryLastTs = now;
+    if (dt < 0) dt = 0;
+    if (dt > 48) dt = 48;
+    let n = Math.round(dt * starryPlan.length / STARRY_MS);
+    if (n < 1) n = 1;
+    if (n > 28) n = 28;
+    while (n > 0 && starryIdx < starryPlan.length) {
+      paintStarryPoint(starryPlan[starryIdx++]);
+      n--;
+    }
+    if (starryIdx >= starryPlan.length) stopStarry(true);
+    else updateColorUI();
+  }
+
   function setAuto(on) {
+    if (on && starryOn) stopStarry(true);
     autoOn = on;
     btnAuto.classList.toggle('active', on);
     btnAuto.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -440,13 +774,23 @@
   }
 
   btnAuto.onclick = () => setAuto(!autoOn);
+  btnStarry.onclick = () => {
+    if (starryOn) stopStarry(true);
+    else startStarry();
+  };
 
-  function tick() {
-    if (autoOn && !document.hidden) stepAuto();
+  function tick(ts) {
+    if (!document.hidden) {
+      if (starryOn) stepStarry(ts);
+      else if (autoOn) stepAuto();
+    }
     requestAnimationFrame(tick);
   }
 
-  document.getElementById('btnClear').onclick = () => { clearCanvas(); };
+  document.getElementById('btnClear').onclick = () => {
+    if (starryOn) stopStarry(true);
+    clearCanvas();
+  };
   document.getElementById('btnSave').onclick = () => {
     const a = document.createElement('a');
     a.download = 'purple-draw.png';
@@ -458,6 +802,9 @@
   updateColorUI();
   resize();
   clearCanvas();
+  if ((new URLSearchParams(location.search).get('painting') || '').toLowerCase() === 'starry') {
+    startStarry();
+  }
   requestAnimationFrame(tick);
 })();
 </script>
