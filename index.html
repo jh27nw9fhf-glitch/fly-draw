@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%23c084fc'/%3E%3C/svg%3E" />
   <title>Purple Draw</title>
-  <meta name="fly-draw-build" content="2d89ac768d" />
+  <meta name="fly-draw-build" content="a10235e39b" />
 <style>
   :root {
     --bg: #ffffff;
@@ -114,17 +114,17 @@
       <input id="size" type="range" min="4" max="48" value="14" />
     </div>
     <div class="actions">
-      <button id="btnAuto" type="button" aria-pressed="false" title="The fly paints his best Starry Night, then fixes what is wrong">Autopilot</button>
+      <button id="btnAuto" type="button" aria-pressed="false" title="The fly paints his best Starry Night, then keeps doing better until it is basically a replica">Autopilot</button>
       <button id="btnStarry" type="button" aria-pressed="false" title="Paint The Starry Night">Starry Night</button>
       <button id="btnClear" class="danger" type="button">Clear</button>
       <button id="btnSave" type="button">Save</button>
     </div>
   </div>
   <div id="inventRow">
-    <button id="btnInvent" type="button" aria-pressed="false" aria-describedby="inventHint" title="Turn this on and the fly invents brush size and shape, then fixes brushes that do not match">Fly makes brushes</button>
-    <p id="inventHint">Off. Turn this on and the fly decides brush size and shape, then fixes brushes that do not match.</p>
+    <button id="btnInvent" type="button" aria-pressed="false" aria-describedby="inventHint" title="Turn this on and the fly invents brush size and shape, then keeps fixing them until the painting is a replica">Fly makes brushes</button>
+    <p id="inventHint">Off. Turn this on and the fly decides brush size and shape, then keeps fixing them until the painting is a replica.</p>
   </div>
-  <p id="practiceNote" role="status" aria-live="polite">The fly paints his best Starry Night, then fixes what he got wrong.</p>
+  <p id="practiceNote" role="status" aria-live="polite">The fly paints his best Starry Night, then keeps doing better until it is basically a replica.</p>
   <p id="brushHud" hidden>The fly has not made a brush yet.</p>
   <div id="colors">
     <div id="hueBar" role="slider" aria-label="Hue" aria-valuemin="0" aria-valuemax="360"><div class="knob" id="hueKnob"></div></div>
@@ -166,11 +166,14 @@
   let flyIdx = 0;
   let flyPhase = 0;
   let flyLastTs = 0;
-  // Autopilot paints its best Starry Night first, compares that canvas to
-  // the real one, says what is wrong, and fixes it. Then it looks again.
-  const PRACTICE_HINT = "The fly paints his best Starry Night, then fixes what he got wrong.";
-  const MAX_LOOKS = 6;
-  const FIX_AMOUNT = 0.7;
+  // Autopilot paints its best Starry Night first, then keeps comparing,
+  // critiquing, and fixing until the canvas is basically a replica.
+  const PRACTICE_HINT = "The fly paints his best Starry Night, then keeps doing better until it is basically a replica.";
+  const MAX_LOOKS = 12;
+  const FIX_AMOUNT = 0.62;
+  // Mean per-pixel color gap (sum of red, green, and blue). Identity is 0.
+  // Stay under this before calling the painting a replica.
+  const REPLICA_DISTANCE = 2.5;
   let lookPass = 0;
   let lookPhase = 'idle';
   let critiquePauseUntil = 0;
@@ -370,11 +373,43 @@
     };
   }
 
-  // The fly's best brush for this stroke. Size and shape come from the stroke.
+  // A plain ribbon the same width as the real stroke. Later looks move
+  // invented brushes toward this so the canvas can become a replica.
+  function plainBrush(stats) {
+    return {
+      diameter: clampNum(Math.round(stats.meanR * 2), 2, 64),
+      opacity: 1,
+      edge: 0,
+      taper: 0,
+      flat: 0,
+      core: 0,
+      jitter: 0,
+      phase: 0
+    };
+  }
+
+  function mixBrush(a, b, k) {
+    function m(p) { return a[p] + (b[p] - a[p]) * k; }
+    return {
+      diameter: Math.max(2, Math.round(m('diameter'))),
+      opacity: m('opacity'),
+      edge: m('edge'),
+      taper: m('taper'),
+      flat: m('flat'),
+      core: m('core'),
+      jitter: m('jitter'),
+      phase: 0
+    };
+  }
+
+  // First look: the fly's own best brush. Each later look moves that brush
+  // toward the real stroke until the painting can match.
   function decideBrush(stats) {
-    const brush = goalBrush(stats);
-    brush.phase = 0;
-    return brush;
+    const invented = goalBrush(stats);
+    invented.phase = 0;
+    if (lookPass <= 0) return invented;
+    const k = Math.min(1, lookPass / 5);
+    return mixBrush(invented, plainBrush(stats), k);
   }
 
   function shapeKey(brush) {
@@ -456,8 +491,8 @@
     btnInvent.setAttribute('aria-pressed', inventOn ? 'true' : 'false');
     btnInvent.textContent = inventOn ? 'Fly makes brushes: on' : 'Fly makes brushes';
     inventHint.textContent = inventOn
-      ? 'On. The fly picks brush size and shape, then fixes brushes that do not match.'
-      : 'Off. Turn this on and the fly decides brush size and shape, then fixes brushes that do not match.';
+      ? 'On. The fly picks brush size and shape, then keeps fixing them until the painting is a replica.'
+      : 'Off. Turn this on and the fly decides brush size and shape, then keeps fixing them until the painting is a replica.';
     try { localStorage.setItem('purpleDrawInventBrushes', inventOn ? '1' : '0'); } catch (_) {}
     if (autoOn) {
       finishStroke();
@@ -967,11 +1002,12 @@
         for (const key in goal) easeMem(key, FIX_AMOUNT);
       }
     }
-    // Named fixes cover the biggest misses. A small extra nudge pulls the
-    // parts the fly has not named yet toward the real painting too.
-    if (lastDistance > 36) {
+    // Keep pulling every part closer until the canvas is a replica,
+    // including parts this look did not name.
+    if (lastDistance > REPLICA_DISTANCE) {
       const goal = memoryIdentity();
-      for (const key in goal) easeMem(key, 0.22);
+      const nudge = lastDistance > 40 ? 0.2 : 0.45;
+      for (const key in goal) easeMem(key, nudge);
     }
   }
 
@@ -1330,14 +1366,20 @@
         if (!issueStillReal(issues[i])) issues.splice(i, 1);
       }
     }
-    if (!issues.length && lastDistance > 18 && !(inventOn && planMatches())) {
-      issues.push({
-        id: 'shapes',
-        severity: 0.45,
-        say: 'Some shapes are still off.',
-        fix: 'all',
-        label: 'the shapes'
-      });
+    // Named notes can go quiet while the canvas is still visibly off.
+    // Keep looking until the pixels are basically the real painting.
+    if (lastDistance > REPLICA_DISTANCE) {
+      let named = false;
+      for (let i = 0; i < issues.length; i++) if (issues[i].fix !== 'all') named = true;
+      if (!named) {
+        issues.push({
+          id: 'replica',
+          severity: Math.min(1, lastDistance / 24),
+          say: 'It is not a replica of the real Starry Night yet.',
+          fix: 'all',
+          label: 'the whole painting'
+        });
+      }
     }
     return issues;
   }
@@ -1474,7 +1516,7 @@
       fixingText = '';
       setPracticeText('Best try. The fly is painting Starry Night.');
     } else {
-      setPracticeText(fixingText || 'Fixing what was wrong.');
+      setPracticeText(fixingText || 'Doing better. Still not a replica.');
     }
     if (inventOn) {
       const tag = document.getElementById('brushHud');
@@ -1487,15 +1529,18 @@
     finishStroke();
     const issues = lookAtPainting();
     lastIssues = issues;
-    if (!issues.length || lookPass >= MAX_LOOKS - 1) {
+    const replica = lastDistance != null && lastDistance <= REPLICA_DISTANCE;
+    if (replica || lookPass >= MAX_LOOKS - 1) {
       lookPhase = 'done';
       critiqueText = critiqueSentence(issues);
-      const line = issues.length
-        ? 'The fly fixed what he could see.'
-        : 'The fly fixed it. This one matches the real Starry Night.';
+      const line = replica
+        ? 'Basically a replica. This one looks just like the real Starry Night.'
+        : 'The fly kept doing better. This is as close as this one got.';
       practiceDone = true;
       critiquePauseUntil = 0;
       setPracticeText(line);
+      const note = document.getElementById('practiceNote');
+      note.dataset.replica = replica ? 'yes' : 'no';
       setAuto(false, { finished: true });
       return;
     }
