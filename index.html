@@ -4,7 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%23c084fc'/%3E%3C/svg%3E" />
-<title>Purple Draw</title>
+  <title>Purple Draw</title>
+  <meta name="fly-draw-build" content="2d89ac768d" />
 <style>
   :root {
     --bg: #ffffff;
@@ -69,7 +70,7 @@
     border: 2px solid #ddd; background: hsl(280 80% 55%);
   }
   #practiceNote {
-    margin: 0; padding: 7px 12px; min-height: 48px;
+    margin: 0; padding: 7px 12px; min-height: 72px; flex: none;
     display: flex; align-items: center;
     background: #f3e8ff; color: #6b21a8;
     font-size: 14px; font-weight: 700; line-height: 1.35;
@@ -113,17 +114,17 @@
       <input id="size" type="range" min="4" max="48" value="14" />
     </div>
     <div class="actions">
-      <button id="btnAuto" type="button" aria-pressed="false" title="The fly practices Starry Night until he gets really good">Autopilot</button>
+      <button id="btnAuto" type="button" aria-pressed="false" title="The fly paints his best Starry Night, then fixes what is wrong">Autopilot</button>
       <button id="btnStarry" type="button" aria-pressed="false" title="Paint The Starry Night">Starry Night</button>
       <button id="btnClear" class="danger" type="button">Clear</button>
       <button id="btnSave" type="button">Save</button>
     </div>
   </div>
   <div id="inventRow">
-    <button id="btnInvent" type="button" aria-pressed="false" aria-describedby="inventHint" title="Turn this on and the fly invents brush size and shape while it practices">Fly makes brushes</button>
-    <p id="inventHint">Off. Turn this on and the fly decides brush size and shape while it practices.</p>
+    <button id="btnInvent" type="button" aria-pressed="false" aria-describedby="inventHint" title="Turn this on and the fly invents brush size and shape, then fixes brushes that do not match">Fly makes brushes</button>
+    <p id="inventHint">Off. Turn this on and the fly decides brush size and shape, then fixes brushes that do not match.</p>
   </div>
-  <p id="practiceNote" role="status" aria-live="polite">The fly practices Starry Night until he's really good.</p>
+  <p id="practiceNote" role="status" aria-live="polite">The fly paints his best Starry Night, then fixes what he got wrong.</p>
   <p id="brushHud" hidden>The fly has not made a brush yet.</p>
   <div id="colors">
     <div id="hueBar" role="slider" aria-label="Hue" aria-valuemin="0" aria-valuemax="360"><div class="knob" id="hueKnob"></div></div>
@@ -165,27 +166,26 @@
   let flyIdx = 0;
   let flyPhase = 0;
   let flyLastTs = 0;
-  // Each Autopilot tap is practice: same Starry Night plan, five tries.
-  // Early tries miss the plan by a lot. The last try paints the straight
-  // ribbons, same as the Starry Night button.
-  const PRACTICE_HINT = "The fly practices Starry Night until he's really good.";
-  const PRACTICE_LEVELS = [1, 0.62, 0.34, 0.14, 0];
-  const PRACTICE_WORDS = [
-    'super wobbly',
-    'less wiggly',
-    'getting better',
-    'almost there',
-    'really good!'
-  ];
-  let practiceRound = 0;
-  let practicePauseUntil = 0;
+  // Autopilot paints its best Starry Night first, compares that canvas to
+  // the real one, says what is wrong, and fixes it. Then it looks again.
+  const PRACTICE_HINT = "The fly paints his best Starry Night, then fixes what he got wrong.";
+  const MAX_LOOKS = 6;
+  const FIX_AMOUNT = 0.7;
+  let lookPass = 0;
+  let lookPhase = 'idle';
+  let critiquePauseUntil = 0;
+  let critiqueText = '';
+  let fixingText = '';
+  let lastIssues = [];
+  let lastDistance = null;
+  let lastStats = '';
+  let flyMemory = null;
+  let refCanvas = null;
+  let refKey = '';
   let practiceDone = false;
-  // Off by default. When on, Autopilot invents brush size and shape during
-  // the practice run. Finger drawing and the Starry Night button stay ribbons.
+  // Off by default. When on, the fly invents a brush for each stroke, then
+  // fixes brushes that do not match the real painting.
   let inventOn = false;
-  // First-try brush for each stroke, remembered so later tries refine it
-  // instead of rolling a new preset.
-  let clumsyMemory = Object.create(null);
   let roundFirstBrush = null;
   let roundMinD = 0;
   let roundMaxD = 0;
@@ -284,41 +284,31 @@
   // One filled stadium per sample gap. Round caps are the same radius as the
   // body, so a slow or sparse finger still lays a solid ribbon. iPad Safari
   // paints each per-move round cap as a fat dot on a hairline.
-  function fillRibbon(x0, y0, r0, x1, y1, r1) {
+  function ribbonOn(context, x0, y0, r0, x1, y1, r1, color) {
     r0 = Math.max(0.5, r0);
     r1 = Math.max(0.5, r1);
     const dx = x1 - x0, dy = y1 - y0;
     const len = Math.hypot(dx, dy);
-    ctx.fillStyle = hsl();
-    ctx.beginPath();
+    context.fillStyle = 'hsl(' + color.hue + ' ' + color.sat + '% ' + color.light + '%)';
+    context.beginPath();
     if (len < 0.01) {
-      ctx.arc(x0, y0, Math.max(r0, r1), 0, Math.PI * 2);
-      ctx.fill();
+      context.arc(x0, y0, Math.max(r0, r1), 0, Math.PI * 2);
+      context.fill();
       return;
     }
     const px = -dy / len, py = dx / len;
     const left = Math.atan2(py, px);
-    ctx.arc(x0, y0, r0, left, left + Math.PI, false);
-    ctx.arc(x1, y1, r1, left + Math.PI, left + Math.PI * 2, false);
-    ctx.closePath();
-    ctx.fill();
+    context.arc(x0, y0, r0, left, left + Math.PI, false);
+    context.arc(x1, y1, r1, left + Math.PI, left + Math.PI * 2, false);
+    context.closePath();
+    context.fill();
+  }
+
+  function fillRibbon(x0, y0, r0, x1, y1, r1) {
+    ribbonOn(ctx, x0, y0, r0, x1, y1, r1, { hue: hue, sat: sat, light: light });
   }
 
   function clampNum(v, a, b) { return Math.max(a, Math.min(b, v)); }
-
-  function unitRand(seed, salt) {
-    let x = (seed + salt * 747796405) >>> 0;
-    x = Math.imul(x ^ (x >>> 16), 2246822507) >>> 0;
-    x = Math.imul(x ^ (x >>> 13), 3266489909) >>> 0;
-    x = (x ^ (x >>> 16)) >>> 0;
-    return x / 4294967296;
-  }
-
-  function mixSeed(stats) {
-    let s = (stats.start + 1) * 1315423911 + Math.round(stats.meanR * 10) * 374761393;
-    s ^= Math.round(stats.meanL * 3) * 668265263;
-    return s >>> 0;
-  }
 
   // What this stroke is, measured when the fly reaches it. No brush names.
   function measureStroke(start) {
@@ -380,60 +370,11 @@
     };
   }
 
-  // The fly's first guess for this stroke. Size and shape are rolled from
-  // the stroke itself, then pushed away from the fit so try 1 is different.
-  function clumsyBrush(stats, seed) {
-    const goal = goalBrush(stats);
-    let swing = 0.34 + unitRand(seed, 1) * 2.35;
-    if (swing > 0.8 && swing < 1.25) swing = unitRand(seed, 8) < 0.5 ? 0.48 : 1.9;
-    const brush = {
-      diameter: clampNum(goal.diameter * swing, 2, 72),
-      opacity: 0.3 + unitRand(seed, 2) * 0.7,
-      edge: unitRand(seed, 3),
-      taper: unitRand(seed, 4),
-      flat: unitRand(seed, 5),
-      core: unitRand(seed, 6),
-      jitter: 0.35 + unitRand(seed, 7) * 0.55,
-      phase: unitRand(seed, 11) * Math.PI * 2
-    };
-    const keys = ['edge', 'taper', 'flat', 'core'];
-    let far = false;
-    for (let i = 0; i < keys.length; i++) {
-      if (Math.abs(brush[keys[i]] - goal[keys[i]]) > 0.28) far = true;
-    }
-    if (!far) brush.edge = goal.edge > 0.5 ? 0.05 : 0.95;
-    if (Math.abs(brush.diameter - goal.diameter) < 4) {
-      brush.diameter = clampNum(goal.diameter + (unitRand(seed, 9) < 0.5 ? -18 : 22), 2, 72);
-    }
+  // The fly's best brush for this stroke. Size and shape come from the stroke.
+  function decideBrush(stats) {
+    const brush = goalBrush(stats);
+    brush.phase = 0;
     return brush;
-  }
-
-  function mixBrush(a, b, k) {
-    function m(p) { return a[p] + (b[p] - a[p]) * k; }
-    return {
-      diameter: Math.max(2, Math.round(m('diameter'))),
-      opacity: m('opacity'),
-      edge: m('edge'),
-      taper: m('taper'),
-      flat: m('flat'),
-      core: m('core'),
-      jitter: m('jitter'),
-      phase: a.phase
-    };
-  }
-
-  function practiceBlend(round) {
-    const i = Math.max(0, Math.min(PRACTICE_LEVELS.length - 1, round));
-    const skill = 1 - PRACTICE_LEVELS[i];
-    return skill * skill * (3 - 2 * skill);
-  }
-
-  // Called when a stroke starts during practice. Later tries keep the same
-  // first guess and move its size and shape toward a fit for this stroke.
-  function decideBrush(round, stats) {
-    const key = String(stats.start);
-    if (!clumsyMemory[key]) clumsyMemory[key] = clumsyBrush(stats, mixSeed(stats));
-    return mixBrush(clumsyMemory[key], goalBrush(stats), practiceBlend(round));
   }
 
   function shapeKey(brush) {
@@ -481,7 +422,7 @@
     tag.dataset.jitter = brush.jitter.toFixed(3);
     tag.dataset.opacity = brush.opacity.toFixed(3);
     tag.dataset.shape = shapeKey(brush);
-    tag.dataset.round = String(practiceRound + 1);
+    tag.dataset.round = String(lookPass + 1);
     if (roundFirstBrush) {
       tag.dataset.firstDiameter = String(roundFirstBrush.diameter);
       tag.dataset.firstShape = shapeKey(roundFirstBrush);
@@ -515,8 +456,8 @@
     btnInvent.setAttribute('aria-pressed', inventOn ? 'true' : 'false');
     btnInvent.textContent = inventOn ? 'Fly makes brushes: on' : 'Fly makes brushes';
     inventHint.textContent = inventOn
-      ? 'On. During practice the fly picks size and shape, and later tries get closer.'
-      : 'Off. Turn this on and the fly decides brush size and shape while it practices.';
+      ? 'On. The fly picks brush size and shape, then fixes brushes that do not match.'
+      : 'Off. Turn this on and the fly decides brush size and shape, then fixes brushes that do not match.';
     try { localStorage.setItem('purpleDrawInventBrushes', inventOn ? '1' : '0'); } catch (_) {}
     if (autoOn) {
       finishStroke();
@@ -876,10 +817,9 @@
   canvas.addEventListener('touchcancel', onTouchUp, { passive: false });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  // Autopilot practices Starry Night five times. Early tries wobble. The last
-  // try follows the plan. With "Fly makes brushes" on, each try also decides
-  // brush size and shape, and later tries move closer to a fit for the stroke.
-  // The Starry Night button still plays the clean fixed-width ribbons once.
+  // Autopilot paints the fly's best Starry Night, compares the canvas to the
+  // real one, says what is wrong, and fixes those parts. The Starry Night
+  // button still plays the real painting once, with fixed ribbons.
   function starryScreen(p) {
     const w = canvas.width / dpr;
     const h = canvas.height / dpr;
@@ -895,15 +835,583 @@
     };
   }
 
-  function practiceSkill() {
-    const i = Math.max(0, Math.min(PRACTICE_LEVELS.length - 1, practiceRound));
-    return PRACTICE_LEVELS[i];
+  function memoryIdentity() {
+    return {
+      skyWidth: 1, skyHue: 0, skySat: 1, skyLight: 0,
+      moonScale: 1, moonDx: 0, moonDy: 0, moonLight: 0, moonSat: 1,
+      starScale: 1, starDx: 0, starDy: 0, starLight: 0,
+      swirlScale: 1, swirlHue: 0,
+      cypressScale: 1, cypressHue: 0, cypressLight: 0,
+      mountainLight: 0,
+      villageScale: 1, villageDy: 0,
+      windowLight: 0, windowSat: 1
+    };
   }
 
-  function practiceDots() {
-    let dots = '';
-    for (let i = 0; i < PRACTICE_LEVELS.length; i++) dots += i <= practiceRound ? '●' : '○';
-    return dots;
+  // The fly's best memory of the painting, before it looks at the real one.
+  // Strokes are clean. The misses are the ones a look can name and fix.
+  function freshMemory() {
+    return {
+      skyWidth: 0.42, skyHue: 42, skySat: 0.55, skyLight: 14,
+      moonScale: 0.5, moonDx: -0.08, moonDy: 0.05, moonLight: 20, moonSat: 0.5,
+      starScale: 0.48, starDx: 0.045, starDy: 0.035, starLight: -14,
+      swirlScale: 0.6, swirlHue: 20,
+      cypressScale: 0.46, cypressHue: 42, cypressLight: 10,
+      mountainLight: 20,
+      villageScale: 0.8, villageDy: 0.02,
+      windowLight: -34, windowSat: 0.4
+    };
+  }
+
+  function applyMemory(plan, mem) {
+    const out = [];
+    for (let i = 0; i < plan.length; i++) {
+      const p = plan[i];
+      const q = {
+        nx: p.nx, ny: p.ny, ox: p.ox || 0, oy: p.oy || 0,
+        rw: p.rw || 0, rh: p.rh || 0, rm: p.rm || 0,
+        hue: p.hue, sat: p.sat, light: p.light,
+        lift: p.lift, role: p.role || 'mark'
+      };
+      const role = q.role;
+      if (role === 'sky') {
+        q.rw *= mem.skyWidth;
+        q.rh *= mem.skyWidth;
+        q.rm *= mem.skyWidth;
+        q.hue = (q.hue + mem.skyHue + 360) % 360;
+        q.sat = clampNum(q.sat * mem.skySat, 0, 100);
+        q.light = clampNum(q.light + mem.skyLight, 0, 96);
+      } else if (role === 'swirl' || role === 'highlight') {
+        const cy = 0.28;
+        q.ny = cy + (q.ny - cy) * mem.swirlScale;
+        q.ox *= mem.swirlScale;
+        q.oy *= mem.swirlScale;
+        q.rm *= mem.swirlScale;
+        q.hue = (q.hue + mem.swirlHue + 360) % 360;
+      } else if (role === 'moon') {
+        q.ox *= mem.moonScale;
+        q.oy *= mem.moonScale;
+        q.rm *= mem.moonScale;
+        q.rw *= mem.moonScale;
+        q.nx += mem.moonDx;
+        q.ny += mem.moonDy;
+        q.light = clampNum(q.light + mem.moonLight, 0, 96);
+        q.sat = clampNum(q.sat * mem.moonSat, 0, 100);
+      } else if (role === 'star' || role === 'starSpin' || role === 'starCore') {
+        q.ox *= mem.starScale;
+        q.oy *= mem.starScale;
+        q.rm *= mem.starScale;
+        q.rw *= mem.starScale;
+        q.nx += mem.starDx;
+        q.ny += mem.starDy;
+        q.light = clampNum(q.light + mem.starLight, 0, 96);
+      } else if (role === 'mountain') {
+        q.light = clampNum(q.light + mem.mountainLight, 0, 96);
+      } else if (role === 'flame' || role === 'vein' || (role === 'outline' && q.nx < 0.28)) {
+        const cx = 0.145;
+        q.nx = cx + (q.nx - cx) * mem.cypressScale;
+        q.rw *= mem.cypressScale;
+        q.rm *= mem.cypressScale;
+        q.hue = (q.hue + mem.cypressHue + 360) % 360;
+        q.light = clampNum(q.light + mem.cypressLight, 0, 96);
+      } else if (role === 'window') {
+        q.light = clampNum(q.light + mem.windowLight, 0, 96);
+        q.sat = clampNum(q.sat * mem.windowSat, 0, 100);
+        q.ny += mem.villageDy;
+        q.nx = 0.62 + (q.nx - 0.62) * mem.villageScale;
+      } else if (role === 'house' || role === 'roof' || role === 'steeple' || role === 'outline') {
+        q.ny += mem.villageDy;
+        q.nx = 0.62 + (q.nx - 0.62) * mem.villageScale;
+      }
+      out.push(q);
+    }
+    return out;
+  }
+
+  function easeMem(key, amount) {
+    flyMemory[key] = flyMemory[key] + (memoryIdentity()[key] - flyMemory[key]) * amount;
+  }
+
+  function applyFixes(issues) {
+    const seen = Object.create(null);
+    for (let i = 0; i < issues.length; i++) {
+      const fix = issues[i].fix;
+      if (seen[fix]) continue;
+      seen[fix] = 1;
+      if (fix === 'sky') easeMem('skyWidth', FIX_AMOUNT);
+      else if (fix === 'skyColor') { easeMem('skyHue', FIX_AMOUNT); easeMem('skySat', FIX_AMOUNT); }
+      else if (fix === 'skyLight') easeMem('skyLight', FIX_AMOUNT);
+      else if (fix === 'moonSize') {
+        easeMem('moonScale', FIX_AMOUNT);
+        easeMem('moonLight', FIX_AMOUNT);
+        easeMem('moonSat', FIX_AMOUNT);
+      }
+      else if (fix === 'moonPlace') { easeMem('moonDx', FIX_AMOUNT); easeMem('moonDy', FIX_AMOUNT); }
+      else if (fix === 'moonPale') { easeMem('moonLight', FIX_AMOUNT); easeMem('moonSat', FIX_AMOUNT); }
+      else if (fix === 'stars') {
+        easeMem('starScale', FIX_AMOUNT);
+        easeMem('starLight', FIX_AMOUNT);
+        easeMem('starDx', FIX_AMOUNT);
+        easeMem('starDy', FIX_AMOUNT);
+      } else if (fix === 'tree') easeMem('cypressScale', FIX_AMOUNT);
+      else if (fix === 'treeColor') { easeMem('cypressHue', FIX_AMOUNT); easeMem('cypressLight', FIX_AMOUNT); }
+      else if (fix === 'windows') {
+        easeMem('windowLight', FIX_AMOUNT);
+        easeMem('windowSat', FIX_AMOUNT);
+        easeMem('villageScale', FIX_AMOUNT);
+        easeMem('villageDy', FIX_AMOUNT);
+      } else if (fix === 'hills') easeMem('mountainLight', FIX_AMOUNT);
+      else if (fix === 'swirls') { easeMem('swirlScale', FIX_AMOUNT); easeMem('swirlHue', FIX_AMOUNT); }
+      else if (fix === 'all') {
+        const goal = memoryIdentity();
+        for (const key in goal) easeMem(key, FIX_AMOUNT);
+      }
+    }
+    // Named fixes cover the biggest misses. A small extra nudge pulls the
+    // parts the fly has not named yet toward the real painting too.
+    if (lastDistance > 36) {
+      const goal = memoryIdentity();
+      for (const key in goal) easeMem(key, 0.22);
+    }
+  }
+
+  function paintPlanSync(target, plan) {
+    const tctx = target.getContext('2d');
+    tctx.setTransform(1, 0, 0, 1, 0, 0);
+    tctx.fillStyle = '#ffffff';
+    tctx.fillRect(0, 0, target.width, target.height);
+    tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    let prev = null;
+    for (let i = 0; i < plan.length; i++) {
+      const p = plan[i];
+      const s = starryScreen(p);
+      const col = { hue: s.hue, sat: s.sat, light: s.light };
+      if (p.lift || !prev) ribbonOn(tctx, s.x, s.y, s.r, s.x, s.y, s.r, col);
+      else ribbonOn(tctx, prev.x, prev.y, prev.r, s.x, s.y, s.r, col);
+      prev = s;
+    }
+  }
+
+  function ensureRefCanvas() {
+    const key = canvas.width + 'x' + canvas.height + '@' + dpr;
+    if (refCanvas && refKey === key) return refCanvas;
+    refCanvas = document.createElement('canvas');
+    refCanvas.width = canvas.width;
+    refCanvas.height = canvas.height;
+    refKey = key;
+    paintPlanSync(refCanvas, buildStarryPlan());
+    return refCanvas;
+  }
+
+  function grab(source) {
+    const sctx = source.getContext('2d');
+    const w = source.width;
+    const h = source.height;
+    return { w: w, h: h, data: sctx.getImageData(0, 0, w, h).data };
+  }
+
+  function isYellow(R, G, B) {
+    return R > 165 && G > 115 && B < 160 && R > B + 35 && G > B + 8;
+  }
+
+  function rgbHue(R, G, B) {
+    const r = R / 255, g = G / 255, b = B / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    if (max - min < 0.03) return -1;
+    const d = max - min;
+    let h;
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+    return h;
+  }
+
+  function meanHue(img, nx0, ny0, nx1, ny1, pred) {
+    const x0 = Math.max(0, Math.floor(nx0 * img.w));
+    const x1 = Math.min(img.w, Math.ceil(nx1 * img.w));
+    const y0 = Math.max(0, Math.floor(ny0 * img.h));
+    const y1 = Math.min(img.h, Math.ceil(ny1 * img.h));
+    const step = Math.max(1, Math.floor(Math.min(img.w, img.h) / 160));
+    let s = 0, c = 0, n = 0;
+    for (let y = y0; y < y1; y += step) {
+      const row = y * img.w;
+      for (let x = x0; x < x1; x += step) {
+        const i = (row + x) * 4;
+        const R = img.data[i], G = img.data[i + 1], B = img.data[i + 2];
+        if (pred && !pred(R, G, B)) continue;
+        const h = rgbHue(R, G, B);
+        if (h < 0) continue;
+        const rad = h * Math.PI / 180;
+        s += Math.sin(rad);
+        c += Math.cos(rad);
+        n++;
+      }
+    }
+    if (!n) return null;
+    return (Math.atan2(s, c) * 180 / Math.PI + 360) % 360;
+  }
+
+  function treeMass(img) {
+    const x1 = Math.floor(img.w * 0.30);
+    const y0 = Math.floor(img.h * 0.18);
+    const y1 = Math.floor(img.h * 0.96);
+    const step = 2;
+    let hits = 0, n = 0, minx = img.w, maxx = 0;
+    for (let y = y0; y < y1; y += step) {
+      const row = y * img.w;
+      for (let x = 0; x < x1; x += step) {
+        n++;
+        const i = (row + x) * 4;
+        const R = img.data[i], G = img.data[i + 1], B = img.data[i + 2];
+        const h = rgbHue(R, G, B);
+        const L = (R + G + B) / 3;
+        if (h >= 95 && h < 215 && L < 110) {
+          hits++;
+          if (x < minx) minx = x;
+          if (x > maxx) maxx = x;
+        }
+      }
+    }
+    return {
+      coverage: n ? hits / n : 0,
+      w: hits ? (maxx - minx) / img.w : 0
+    };
+  }
+
+  function isBrightYellow(R, G, B) {
+    return R > 205 && G > 165 && B < 175 && (R + G) > 390;
+  }
+
+  function scan(img, nx0, ny0, nx1, ny1, pred, stepOverride) {
+    const x0 = Math.max(0, Math.floor(nx0 * img.w));
+    const x1 = Math.min(img.w, Math.ceil(nx1 * img.w));
+    const y0 = Math.max(0, Math.floor(ny0 * img.h));
+    const y1 = Math.min(img.h, Math.ceil(ny1 * img.h));
+    const step = stepOverride || Math.max(1, Math.floor(Math.min(img.w, img.h) / 170));
+    let n = 0, cov = 0, cr = 0, cg = 0, cb = 0;
+    let hits = 0, pr = 0, pg = 0, pb = 0, hx = 0, hy = 0;
+    let minx = img.w, miny = img.h, maxx = 0, maxy = 0;
+    for (let y = y0; y < y1; y += step) {
+      const row = y * img.w;
+      for (let x = x0; x < x1; x += step) {
+        const i = (row + x) * 4;
+        const R = img.data[i], G = img.data[i + 1], B = img.data[i + 2];
+        n++;
+        const white = R > 242 && G > 242 && B > 242;
+        if (!white) { cov++; cr += R; cg += G; cb += B; }
+        if (pred && pred(R, G, B)) {
+          hits++;
+          pr += R; pg += G; pb += B;
+          hx += x; hy += y;
+          if (x < minx) minx = x;
+          if (y < miny) miny = y;
+          if (x > maxx) maxx = x;
+          if (y > maxy) maxy = y;
+        }
+      }
+    }
+    return {
+      n: n,
+      coverage: n ? cov / n : 0,
+      cr: cov ? cr / cov : 255,
+      cg: cov ? cg / cov : 255,
+      cb: cov ? cb / cov : 255,
+      hits: hits,
+      pr: hits ? pr / hits : 0,
+      pg: hits ? pg / hits : 0,
+      pb: hits ? pb / hits : 0,
+      cx: hits ? (hx / hits) / img.w : null,
+      cy: hits ? (hy / hits) / img.h : null,
+      bw: hits ? (maxx - minx) / img.w : 0,
+      bh: hits ? (maxy - miny) / img.h : 0
+    };
+  }
+
+  function lookAtPainting() {
+    const fly = grab(canvas);
+    const ref = grab(ensureRefCanvas());
+    const issues = [];
+    const skyF = scan(fly, 0.32, 0.0, 0.98, 0.16);
+    const skyR = scan(ref, 0.32, 0.0, 0.98, 0.16);
+    if (skyF.coverage < skyR.coverage - 0.06) {
+      issues.push({
+        id: 'skyGaps',
+        severity: skyR.coverage - skyF.coverage,
+        say: inventOn ? 'The sky brush is too thin, so white shows through.' : 'The sky has white gaps.',
+        fix: 'sky',
+        label: 'the sky'
+      });
+    }
+    function skyPixel(R, G, B) {
+      if (R > 242 && G > 242 && B > 242) return false;
+      if (isYellow(R, G, B)) return false;
+      return B > R + 8 && B > 40;
+    }
+    const skyHueF = meanHue(fly, 0.32, 0.0, 0.75, 0.2, skyPixel);
+    const skyHueR = meanHue(ref, 0.32, 0.0, 0.75, 0.2, skyPixel);
+    let skyHueGap = 0;
+    if (skyHueF != null && skyHueR != null) {
+      skyHueGap = skyHueF - skyHueR;
+      if (skyHueGap > 180) skyHueGap -= 360;
+      if (skyHueGap < -180) skyHueGap += 360;
+      if (skyHueGap > 10) {
+        issues.push({
+          id: 'skyColor',
+          severity: skyHueGap / 40,
+          say: 'The sky is too purple.',
+          fix: 'skyColor',
+          label: 'the sky color'
+        });
+      }
+    }
+    const skyLumF = (skyF.cr + skyF.cg + skyF.cb) / 3;
+    const skyLumR = (skyR.cr + skyR.cg + skyR.cb) / 3;
+    if (skyF.coverage > 0.4 && skyLumF > skyLumR + 22) {
+      issues.push({
+        id: 'skyLight',
+        severity: (skyLumF - skyLumR) / 50,
+        say: 'The sky is too light.',
+        fix: 'skyLight',
+        label: 'the sky'
+      });
+    }
+
+    const moonF = scan(fly, 0.68, 0.02, 0.98, 0.30, isYellow, 2);
+    const moonR = scan(ref, 0.68, 0.02, 0.98, 0.30, isYellow, 2);
+    if (moonR.hits > 12 && moonF.hits < moonR.hits * 0.72) {
+      issues.push({
+        id: 'moonSize',
+        severity: 1 - moonF.hits / moonR.hits,
+        say: inventOn ? 'The moon brush is too small.' : 'The moon is too small.',
+        fix: 'moonSize',
+        label: 'the moon'
+      });
+    }
+    if (moonF.cx != null && moonR.cx != null) {
+      const dist = Math.hypot(moonF.cx - moonR.cx, moonF.cy - moonR.cy);
+      if (dist > 0.028) {
+        issues.push({
+          id: 'moonPlace',
+          severity: dist * 6,
+          say: 'The moon is in the wrong spot.',
+          fix: 'moonPlace',
+          label: 'the moon'
+        });
+      }
+    }
+    if (moonF.hits > 6 && moonR.hits > 6 && (moonF.pr - moonF.pb) < (moonR.pr - moonR.pb) * 0.8) {
+      issues.push({
+        id: 'moonPale',
+        severity: 0.62,
+        say: 'The moon is too pale.',
+        fix: 'moonPale',
+        label: 'the moon'
+      });
+    }
+
+    const starF = scan(fly, 0.16, 0.02, 0.70, 0.56, isYellow, 2);
+    const starR = scan(ref, 0.16, 0.02, 0.70, 0.56, isYellow, 2);
+    if (starR.hits > 10 && starF.hits < starR.hits * 0.68) {
+      issues.push({
+        id: 'stars',
+        severity: 1 - starF.hits / starR.hits,
+        say: inventOn ? 'The star brushes are too small and dim.' : 'The stars are too small and dim.',
+        fix: 'stars',
+        label: 'the stars'
+      });
+    }
+
+    const treeF = treeMass(fly);
+    const treeR = treeMass(ref);
+    if (treeR.coverage > 0.05 && treeF.coverage < treeR.coverage * 0.72) {
+      issues.push({
+        id: 'treeSize',
+        severity: 1 - treeF.coverage / treeR.coverage,
+        say: inventOn ? 'The tree brush is too thin.' : 'The big tree is too skinny.',
+        fix: 'tree',
+        label: 'the big tree'
+      });
+    }
+    const trunkF = scan(fly, 0.08, 0.4, 0.22, 0.92, null, 2);
+    const trunkR = scan(ref, 0.08, 0.4, 0.22, 0.92, null, 2);
+    if (trunkF.coverage > 0.15 && (trunkF.cb - trunkF.cg) > (trunkR.cb - trunkR.cg) + 8) {
+      issues.push({
+        id: 'treeColor',
+        severity: 0.55,
+        say: 'The big tree is the wrong color.',
+        fix: 'treeColor',
+        label: 'the big tree'
+      });
+    }
+
+    const winF = scan(fly, 0.30, 0.74, 0.98, 0.99, isBrightYellow, 1);
+    const winR = scan(ref, 0.30, 0.74, 0.98, 0.99, isBrightYellow, 1);
+    if (winR.hits > 4 && winF.hits < winR.hits * 0.5) {
+      issues.push({
+        id: 'windows',
+        severity: 0.7,
+        say: 'The windows need more glow.',
+        fix: 'windows',
+        label: 'the windows'
+      });
+    }
+
+    const hillF = scan(fly, 0.28, 0.58, 0.98, 0.80, null, 2);
+    const hillR = scan(ref, 0.28, 0.58, 0.98, 0.80, null, 2);
+    const hillLumF = (hillF.cr + hillF.cg + hillF.cb) / 3;
+    const hillLumR = (hillR.cr + hillR.cg + hillR.cb) / 3;
+    if (hillLumF > hillLumR + 16) {
+      issues.push({
+        id: 'hills',
+        severity: (hillLumF - hillLumR) / 36,
+        say: 'The hills are too pale.',
+        fix: 'hills',
+        label: 'the hills'
+      });
+    }
+
+    function ringSpread(img, cx, cy, rad) {
+      const m = Math.min(img.w, img.h);
+      const vals = [];
+      for (let i = 0; i < 28; i++) {
+        const a = (i / 28) * Math.PI * 2;
+        const x = Math.max(0, Math.min(img.w - 1, Math.round((cx + Math.cos(a) * rad * m / img.w) * img.w)));
+        const y = Math.max(0, Math.min(img.h - 1, Math.round((cy + Math.sin(a) * rad * m / img.h) * img.h)));
+        const p = (y * img.w + x) * 4;
+        vals.push((img.data[p] + img.data[p + 1] + img.data[p + 2]) / 3);
+      }
+      let mean = 0;
+      for (let i = 0; i < vals.length; i++) mean += vals[i];
+      mean /= vals.length;
+      let v = 0;
+      for (let i = 0; i < vals.length; i++) v += (vals[i] - mean) * (vals[i] - mean);
+      return Math.sqrt(v / vals.length);
+    }
+    const swF = ringSpread(fly, 0.42, 0.26, 0.15);
+    const swR = ringSpread(ref, 0.42, 0.26, 0.15);
+    const swDist = swR - swF;
+    if (swR > 8 && swF < swR * 0.72) {
+      issues.push({
+        id: 'swirls',
+        severity: (swR - swF) / swR,
+        say: 'The swirls are the wrong shape.',
+        fix: 'swirls',
+        label: 'the swirls'
+      });
+    }
+
+    issues.sort(function (a, b) { return b.severity - a.severity; });
+    let diff = 0, samples = 0;
+    const step = Math.max(2, Math.floor(Math.min(fly.w, fly.h) / 70));
+    for (let y = 0; y < fly.h; y += step) {
+      for (let x = 0; x < fly.w; x += step) {
+        const i = (y * fly.w + x) * 4;
+        const j = (y * ref.w + x) * 4;
+        diff += Math.abs(fly.data[i] - ref.data[j]) + Math.abs(fly.data[i + 1] - ref.data[j + 1]) + Math.abs(fly.data[i + 2] - ref.data[j + 2]);
+        samples++;
+      }
+    }
+    lastDistance = samples ? diff / samples : 0;
+    lastStats = [
+      'sky ' + skyF.coverage.toFixed(2) + '/' + skyR.coverage.toFixed(2),
+      'hue ' + (skyHueGap).toFixed(0),
+      'moon ' + moonF.hits + '/' + moonR.hits,
+      'pale ' + Math.round(moonF.pr - moonF.pb) + '/' + Math.round(moonR.pr - moonR.pb),
+      'sw ' + swF.toFixed(1) + '/' + swR.toFixed(1),
+      'stars ' + starF.hits + '/' + starR.hits,
+      'tree ' + treeF.coverage.toFixed(2) + '/' + treeR.coverage.toFixed(2),
+      'win ' + winF.hits + '/' + winR.hits,
+      'dist ' + lastDistance.toFixed(1)
+    ].join(' ');
+    if (inventOn) {
+      for (let i = issues.length - 1; i >= 0; i--) {
+        if (!issueStillReal(issues[i])) issues.splice(i, 1);
+      }
+    }
+    if (!issues.length && lastDistance > 18 && !(inventOn && planMatches())) {
+      issues.push({
+        id: 'shapes',
+        severity: 0.45,
+        say: 'Some shapes are still off.',
+        fix: 'all',
+        label: 'the shapes'
+      });
+    }
+    return issues;
+  }
+
+  const FIX_TOL = {
+    skyWidth: 0.06, skyHue: 4, skySat: 0.06, skyLight: 3,
+    moonScale: 0.06, moonDx: 0.015, moonDy: 0.015, moonLight: 3, moonSat: 0.06,
+    starScale: 0.06, starDx: 0.015, starDy: 0.015, starLight: 3,
+    swirlScale: 0.06, swirlHue: 4,
+    cypressScale: 0.06, cypressHue: 4, cypressLight: 3,
+    mountainLight: 3,
+    villageScale: 0.06, villageDy: 0.012,
+    windowLight: 4, windowSat: 0.08
+  };
+
+  const FIX_KEYS = {
+    sky: ['skyWidth'],
+    skyColor: ['skyHue', 'skySat'],
+    skyLight: ['skyLight'],
+    moonSize: ['moonScale'],
+    moonPlace: ['moonDx', 'moonDy'],
+    moonPale: ['moonLight', 'moonSat'],
+    stars: ['starScale', 'starLight', 'starDx', 'starDy'],
+    tree: ['cypressScale'],
+    treeColor: ['cypressHue', 'cypressLight'],
+    windows: ['windowLight', 'windowSat', 'villageScale', 'villageDy'],
+    hills: ['mountainLight'],
+    swirls: ['swirlScale', 'swirlHue']
+  };
+
+  function keyClose(key) {
+    if (!flyMemory) return false;
+    return Math.abs(flyMemory[key] - memoryIdentity()[key]) <= FIX_TOL[key];
+  }
+
+  function planMatches() {
+    const goal = memoryIdentity();
+    for (const key in goal) if (!keyClose(key)) return false;
+    return true;
+  }
+
+  // Brush texture does not match the real ribbons pixel for pixel. Once the
+  // plan for that part is already corrected, stop calling the brush a mistake.
+  function issueStillReal(issue) {
+    const keys = FIX_KEYS[issue.fix];
+    if (!keys) return true;
+    for (let i = 0; i < keys.length; i++) if (!keyClose(keys[i])) return true;
+    return false;
+  }
+
+  function critiqueSentence(issues) {
+    const says = [];
+    const seen = Object.create(null);
+    for (let i = 0; i < issues.length && says.length < 2; i++) {
+      if (seen[issues[i].say]) continue;
+      seen[issues[i].say] = 1;
+      says.push(issues[i].say.replace(/\.$/, ''));
+    }
+    if (!says.length) return '';
+    return says.join('. ') + '.';
+  }
+
+  function fixingSentence(issues) {
+    const labels = [];
+    const seen = Object.create(null);
+    for (let i = 0; i < issues.length && labels.length < 3; i++) {
+      if (seen[issues[i].label]) continue;
+      seen[issues[i].label] = 1;
+      labels.push(issues[i].label);
+    }
+    if (!labels.length) return 'The fly is checking the real Starry Night.';
+    if (labels.length === 1) return 'Fixing ' + labels[0] + '.';
+    if (labels.length === 2) return 'Fixing ' + labels[0] + ' and ' + labels[1] + '.';
+    return 'Fixing ' + labels[0] + ', ' + labels[1] + ', and ' + labels[2] + '.';
   }
 
   function setPracticeText(text) {
@@ -911,11 +1419,21 @@
     const next = text || PRACTICE_HINT;
     if (note.textContent !== next) note.textContent = next;
     if (text) {
-      note.dataset.round = String(practiceRound + 1);
-      note.dataset.skill = String(practiceSkill());
+      note.dataset.pass = String(lookPass + 1);
+      note.dataset.phase = lookPhase;
+      note.dataset.critique = critiqueText;
+      note.dataset.issues = String(lastIssues.length);
+      note.dataset.issueIds = lastIssues.map(function (item) { return item.id; }).join(' ');
+      if (lastDistance != null) note.dataset.distance = lastDistance.toFixed(1);
+      if (lastStats) note.dataset.stats = lastStats;
     } else {
-      delete note.dataset.round;
-      delete note.dataset.skill;
+      delete note.dataset.pass;
+      delete note.dataset.phase;
+      delete note.dataset.critique;
+      delete note.dataset.issues;
+      delete note.dataset.issueIds;
+      delete note.dataset.distance;
+      delete note.dataset.stats;
     }
   }
 
@@ -928,115 +1446,90 @@
     autoLast = { x: x, y: y, r: r };
   }
 
-  function flyWobble(target, place) {
-    const wobble = practiceSkill();
-    if (wobble <= 0) {
-      place(target.x, target.y, target.r);
-      return;
-    }
-    const w = canvas.width / dpr;
-    const h = canvas.height / dpr;
-    const m = Math.min(w, h);
-    const reach = reduceMotion ? Math.min(m * 0.012, 8) : Math.min(m * 0.075, 56);
-    const amp = reach * wobble;
-    flyPhase += 0.37;
-    const ox = Math.sin(flyPhase * 1.7) * amp + Math.sin(flyPhase * 0.47 + 1.3) * amp * 0.45;
-    const oy = Math.cos(flyPhase * 1.3 + 0.4) * amp * 0.9 + Math.sin(flyPhase * 2.9) * amp * 0.28;
-    const x1 = target.x + ox;
-    const y1 = target.y + oy;
-    if (!autoLast) {
-      place(x1, y1, target.r);
-      return;
-    }
-    const x0 = autoLast.x, y0 = autoLast.y;
-    const r0 = autoLast.r == null ? target.r : autoLast.r;
-    const dx = x1 - x0, dy = y1 - y0;
-    const len = Math.hypot(dx, dy);
-    if (len < 0.4) {
-      place(x1, y1, target.r);
-      return;
-    }
-    const px = -dy / len, py = dx / len;
-    const side = px * ox + py * oy;
-    const bow = side * 0.85 + Math.sin(flyPhase * 2.2) * amp * 0.35;
-    const cx = (x0 + x1) / 2 + px * bow;
-    const cy = (y0 + y1) / 2 + py * bow;
-    const steps = Math.max(2, Math.min(7, Math.ceil(len / 7)));
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const u = 1 - t;
-      const x = u * u * x0 + 2 * u * t * cx + t * t * x1;
-      const y = u * u * y0 + 2 * u * t * cy + t * t * y1;
-      const buzz = Math.sin(flyPhase * 6.5 + t * 11) * Math.min(amp * 0.22, 1.6);
-      const r = r0 + (target.r - r0) * t;
-      place(x + px * buzz, y + py * buzz, r);
-    }
-  }
-
   function flyTowardRibbon(target) {
-    flyWobble(target, (x, y, r) => { paintFly(x, y, r, target); });
+    paintFly(target.x, target.y, target.r, target);
   }
 
   function flyTowardBrush(target) {
-    flyWobble(target, (x, y) => {
-      queueFlyPoint(x, y);
-      autoLast = { x: x, y: y };
-    });
+    queueFlyPoint(target.x, target.y);
+    autoLast = { x: target.x, y: target.y };
   }
 
-  function beginPracticeRound(round) {
+  function beginPaintPass() {
     discardStroke();
     roundFirstBrush = null;
     roundMinD = 0;
     roundMaxD = 0;
     roundShapeKeys = Object.create(null);
-    practiceRound = round;
-    practicePauseUntil = 0;
+    critiquePauseUntil = 0;
     clearCanvas();
-    flyPlan = buildStarryPlan();
+    flyPlan = applyMemory(buildStarryPlan(), flyMemory);
     flyIdx = 0;
     flyPhase = 0;
     flyLastTs = 0;
     autoLast = null;
-    const word = PRACTICE_WORDS[Math.min(round, PRACTICE_WORDS.length - 1)];
-    setPracticeText(practiceDots() + '  Practice ' + (round + 1) + ' of ' + PRACTICE_LEVELS.length + ' · ' + word);
+    lookPhase = 'paint';
+    if (lookPass === 0) {
+      critiqueText = '';
+      fixingText = '';
+      setPracticeText('Best try. The fly is painting Starry Night.');
+    } else {
+      setPracticeText(fixingText || 'Fixing what was wrong.');
+    }
     if (inventOn) {
       const tag = document.getElementById('brushHud');
       tag.hidden = false;
-      tag.textContent = 'Fly is deciding brushes for practice ' + (round + 1) + '…';
+      tag.textContent = lookPass === 0 ? 'The fly is making brushes.' : 'The fly is fixing brushes.';
     }
   }
 
-  function finishPractice() {
+  function finishPaintPass(now) {
     finishStroke();
-    practiceDone = true;
-    practicePauseUntil = 0;
-    setAuto(false, { finished: true });
-    setPracticeText(practiceDots() + "  Really good! The fly's Starry Night is clean.");
+    const issues = lookAtPainting();
+    lastIssues = issues;
+    if (!issues.length || lookPass >= MAX_LOOKS - 1) {
+      lookPhase = 'done';
+      critiqueText = critiqueSentence(issues);
+      const line = issues.length
+        ? 'The fly fixed what he could see.'
+        : 'The fly fixed it. This one matches the real Starry Night.';
+      practiceDone = true;
+      critiquePauseUntil = 0;
+      setPracticeText(line);
+      setAuto(false, { finished: true });
+      return;
+    }
+    lookPhase = 'critique';
+    critiqueText = critiqueSentence(issues);
+    fixingText = fixingSentence(issues);
+    setPracticeText(critiqueText + ' ' + fixingText);
+    critiquePauseUntil = now + LOOK_PAUSE;
   }
 
   function openInventedStroke(target, startIdx) {
     const stats = measureStroke(startIdx);
-    beginStroke(target, decideBrush(practiceRound, stats));
+    beginStroke(target, decideBrush(stats));
   }
 
   function stepFly(ts) {
-    if (!flyPlan.length && !practicePauseUntil) { setAuto(false); return; }
+    if (!autoOn) return;
     const now = ts || performance.now();
-    if (practicePauseUntil) {
-      if (now < practicePauseUntil) return;
-      beginPracticeRound(practiceRound + 1);
+    if (critiquePauseUntil) {
+      if (now < critiquePauseUntil) return;
+      critiquePauseUntil = 0;
+      applyFixes(lastIssues);
+      lookPass += 1;
+      beginPaintPass();
     }
     if (!flyPlan.length) { setAuto(false); return; }
     let dt = flyLastTs ? now - flyLastTs : 16;
     flyLastTs = now;
     if (dt < 0) dt = 0;
     if (dt > 48) dt = 48;
-    const budget = Math.round(STARRY_MS * (reduceMotion ? 1 : 1.7));
-    const burst = 0.7 + 0.6 * (0.5 + 0.5 * Math.sin(flyPhase * 0.15));
-    let n = Math.round(dt * flyPlan.length / budget * burst);
+    let n = Math.round(dt * flyPlan.length / PAINT_BUDGET);
     if (n < 1) n = 1;
-    if (n > 40) n = 40;
+    const cap = fastPace ? 240 : 48;
+    if (n > cap) n = cap;
     while (n > 0 && flyIdx < flyPlan.length) {
       const raw = flyPlan[flyIdx++];
       const target = starryScreen(raw);
@@ -1053,15 +1546,8 @@
       }
       n--;
     }
-    if (flyIdx >= flyPlan.length) {
-      if (inventOn) finishStroke();
-      if (practiceRound >= PRACTICE_LEVELS.length - 1) finishPractice();
-      else {
-        practicePauseUntil = now + (reduceMotion ? 400 : 1600);
-        const nextWord = PRACTICE_WORDS[Math.min(practiceRound + 1, PRACTICE_WORDS.length - 1)];
-        setPracticeText(practiceDots() + '  Practice ' + (practiceRound + 1) + ' of ' + PRACTICE_LEVELS.length + ' done. Next: ' + nextWord + '.');
-      }
-    } else if (inventOn) {
+    if (flyIdx >= flyPlan.length) finishPaintPass(now);
+    else if (inventOn) {
       renderActiveStroke();
       updateColorUI();
     } else updateColorUI();
@@ -1071,7 +1557,10 @@
   // nx/ny cover the canvas. ox/oy/rm are fractions of the short side so the
   // moon, stars, and swirls stay round on a phone or a wide window.
   const reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-  const STARRY_MS = reduceMotion ? 700 : 12000;
+  const fastPace = /(?:\?|&)pace=fast(?:&|$)/.test(location.search);
+  const STARRY_MS = fastPace ? 500 : (reduceMotion ? 700 : 12000);
+  const LOOK_PAUSE = fastPace ? 900 : (reduceMotion ? 600 : 2600);
+  const PAINT_BUDGET = fastPace ? 700 : (reduceMotion ? 900 : 11000);
 
   function buildStarryPlan() {
     const plan = [];
@@ -1371,7 +1860,7 @@
     if (autoOn) setAuto(false);
     hideBrushHud();
     practiceDone = false;
-    setPracticeText('Playing the clean Starry Night.');
+    setPracticeText('Playing the real Starry Night.');
     savedColor = { hue, sat, light };
     clearCanvas();
     starryPlan = buildStarryPlan();
@@ -1421,8 +1910,15 @@
     if (autoOn) {
       practiceDone = false;
       savedColor = { hue, sat, light };
-      clumsyMemory = Object.create(null);
-      beginPracticeRound(0);
+      flyMemory = freshMemory();
+      lookPass = 0;
+      lastIssues = [];
+      lastDistance = null;
+      lastStats = '';
+      critiqueText = '';
+      fixingText = '';
+      lookPhase = 'paint';
+      beginPaintPass();
       return;
     }
     autoLast = null;
@@ -1430,10 +1926,13 @@
     flyIdx = 0;
     flyPhase = 0;
     flyLastTs = 0;
-    practicePauseUntil = 0;
+    critiquePauseUntil = 0;
     if (!opts.finished) {
       practiceDone = false;
-      practiceRound = 0;
+      lookPass = 0;
+      lookPhase = 'idle';
+      lastIssues = [];
+      critiqueText = '';
       setPracticeText('');
       hideBrushHud();
     }
@@ -1467,7 +1966,10 @@
     discardStroke();
     hideBrushHud();
     practiceDone = false;
-    practiceRound = 0;
+    lookPass = 0;
+    lookPhase = 'idle';
+    lastIssues = [];
+    critiqueText = '';
     setPracticeText('');
     clearCanvas();
   };
@@ -1492,6 +1994,35 @@
   if ((bootParams.get('painting') || '').toLowerCase() === 'starry') {
     startStarry();
   }
+  window.__flyDraw = {
+    state: function () {
+      const note = document.getElementById('practiceNote');
+      return {
+        phase: note.dataset.phase || '',
+        pass: note.dataset.pass || '',
+        text: note.textContent,
+        issues: note.dataset.issueIds || '',
+        distance: note.dataset.distance || '',
+        stats: note.dataset.stats || '',
+        memory: flyMemory,
+        invent: btnInvent.getAttribute('aria-pressed'),
+        hint: inventHint.textContent
+      };
+    },
+    paintMemory: function (mem) {
+      if (autoOn) setAuto(false);
+      if (starryOn) stopStarry(false);
+      discardStroke();
+      clearCanvas();
+      paintPlanSync(canvas, applyMemory(buildStarryPlan(), mem || memoryIdentity()));
+      const issues = lookAtPainting();
+      return {
+        issues: issues.map(function (item) { return item.id + ':' + item.severity.toFixed(2) + ':' + item.say; }),
+        distance: lastDistance,
+        stats: lastStats
+      };
+    }
+  };
   requestAnimationFrame(tick);
 })();
 </script>
